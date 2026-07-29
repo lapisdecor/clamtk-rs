@@ -1,0 +1,25 @@
+[package]
+name = "clamtk-rs"
+version = "1.0.0"
+edition = "2021"
+description = "A GTK4 graphical frontend for ClamAV — Rust port of ClamTK"
+license = "GPL-3.0-or-later"
+
+[dependencies]
+gtk4 = "0.9"
+glib = "0.20"
+gio = "0.20"
+pango = "0.20"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+anyhow = "1"
+crossbeam-channel = "0.5"
+log = "0.4"
+env_logger = "0.11"
+sha2 = "0.10"
+walkdir = "2"
+
+[build-dependencies]
+glib-build-tools = "0.20"
