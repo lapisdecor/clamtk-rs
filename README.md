@@ -1,3 +1,5 @@
+![preview](clamtk-rs.png "Clamtk-rs")
+
 ## **Build & Run Instructions**  
 bash  
 # Prerequisites  
