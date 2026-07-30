@@ -11,7 +11,11 @@ pub struct DashboardPage {
 }
 
 impl DashboardPage {
-    pub fn new() -> Self {
+    pub fn new(
+        on_scan_home: Option<std::boxed::Box<dyn Fn() + 'static>>,
+        on_update: Option<std::boxed::Box<dyn Fn() + 'static>>,
+        on_settings: Option<std::boxed::Box<dyn Fn() + 'static>>,
+    ) -> Self {
         let container = Box::new(Orientation::Vertical, 16);
         container.set_margin_start(24);
         container.set_margin_end(24);
@@ -184,6 +188,24 @@ impl DashboardPage {
         actions_box.append(&quick_scan_btn);
         actions_box.append(&quick_update_btn);
         actions_box.append(&quick_prefs_btn);
+
+        if let Some(callback) = on_scan_home {
+            quick_scan_btn.connect_clicked(move |_| {
+                callback();
+            });
+        }
+
+        if let Some(callback) = on_update {
+            quick_update_btn.connect_clicked(move |_| {
+                callback();
+            });
+        }
+
+        if let Some(callback) = on_settings {
+            quick_prefs_btn.connect_clicked(move |_| {
+                callback();
+            });
+        }
 
         container.append(&actions_box);
 

@@ -133,7 +133,7 @@ impl Scanner {
             // Read stdout incrementally
             let reader = std::io::BufReader::new(stdout);
             let mut files_scanned = 0u64;
-            let mut known_threats = 0u64;
+            let known_threats = 0u64;
             let mut results = Vec::new();
             let mut all_lines = Vec::new();
 
@@ -169,6 +169,7 @@ impl Scanner {
                         let path = line[..pos].to_string();
                         let rest = &line[pos + 2..];
                         let threat = rest.replace("FOUND", "").trim().to_string();
+                        files_scanned += 1;
                         let result = ScanResult {
                             path: path.clone(),
                             status: FileStatus::Infected,
@@ -176,7 +177,6 @@ impl Scanner {
                         };
                         results.push(result.clone());
                         let _ = tx.send(ScanMessage::FileResult(result));
-
                         let _ = tx.send(ScanMessage::Progress {
                             current_file: path,
                             files_scanned,
@@ -187,12 +187,14 @@ impl Scanner {
                 } else if line.contains("OK") {
                     if let Some(pos) = line.rfind(": ") {
                         let path = line[..pos].to_string();
-                        results.push(ScanResult {
+                        files_scanned += 1;
+                        let result = ScanResult {
                             path: path.clone(),
                             status: FileStatus::Clean,
                             threat: None,
-                        });
-                        files_scanned += 1;
+                        };
+                        results.push(result.clone());
+                        let _ = tx.send(ScanMessage::FileResult(result));
                         let _ = tx.send(ScanMessage::Progress {
                             current_file: path,
                             files_scanned,
@@ -203,11 +205,14 @@ impl Scanner {
                 } else if line.contains("ERROR") {
                     if let Some(pos) = line.rfind(": ") {
                         let path = line[..pos].to_string();
-                        results.push(ScanResult {
+                        files_scanned += 1;
+                        let result = ScanResult {
                             path: path.clone(),
                             status: FileStatus::Error,
                             threat: None,
-                        });
+                        };
+                        results.push(result.clone());
+                        let _ = tx.send(ScanMessage::FileResult(result));
                         let _ = tx.send(ScanMessage::Progress {
                             current_file: path,
                             files_scanned,
@@ -279,9 +284,6 @@ impl Scanner {
             if summary.files_scanned > 0 {
                 files_scanned = summary.files_scanned;
             }
-            if summary.known_threats > 0 {
-                known_threats = summary.known_threats;
-            }
 
             let infected_results: Vec<ScanResult> = results
                 .iter()
@@ -302,7 +304,7 @@ impl Scanner {
                 target: target_str.clone(),
                 timestamp: Local::now(),
                 files_scanned,
-                threats_found: known_threats,
+                threats_found: infected_results.len() as u64,
                 time_elapsed: elapsed,
                 infected_files: infected_results
                     .iter()
@@ -322,7 +324,6 @@ impl Scanner {
 #[derive(Debug)]
 struct ScanSummary {
     files_scanned: u64,
-    known_threats: u64,
 }
 
 fn parse_clamscan_output(output: &str) -> Vec<ScanResult> {
@@ -371,15 +372,9 @@ fn parse_clamscan_output(output: &str) -> Vec<ScanResult> {
 
 fn parse_clamscan_summary(output: &str) -> ScanSummary {
     let mut files_scanned = 0u64;
-    let mut known_threats = 0u64;
 
     for line in output.lines() {
         let line = line.trim().to_lowercase();
-        if line.starts_with("known viruses:") {
-            if let Some(v) = line.split(':').nth(1) {
-                known_threats = v.trim().parse().unwrap_or(0);
-            }
-        }
         if line.starts_with("engine version:") {
             // skip
         }
@@ -400,7 +395,6 @@ fn parse_clamscan_summary(output: &str) -> ScanSummary {
 
     ScanSummary {
         files_scanned,
-        known_threats,
     }
 }
 

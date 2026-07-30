@@ -14,6 +14,7 @@ use crate::scanner::{ScanMessage, ScanType, Scanner};
 
 pub struct ScanPage {
     container: Box,
+    start_scan_fn: Rc<RefCell<Option<std::boxed::Box<dyn Fn(PathBuf, ScanType)>>>>,
 }
 
 impl ScanPage {
@@ -125,6 +126,8 @@ impl ScanPage {
         container.append(&results_scroll);
 
         // Wire up buttons
+        let start_scan_fn: Rc<RefCell<Option<std::boxed::Box<dyn Fn(PathBuf, ScanType)>>>> = Rc::new(RefCell::new(None));
+
         let scanner_rc = scanner.clone();
         let config_rc = config.clone();
         let progress_bar_clone = progress_bar.clone();
@@ -186,40 +189,47 @@ impl ScanPage {
                             pb.set_text(Some(&format!("Scanning: {} ({})", target, type_str)));
                             cfl.set_label(&format!("Scanning: {}", target));
                         }
-                        Ok(ScanMessage::Progress { current_file, files_scanned, .. }) => {
+                        Ok(ScanMessage::Progress { current_file, files_scanned, known_threats }) => {
                             cfl.set_label(&crate::utils::truncate_path(&current_file, 80));
-                            // Pulse the progress bar (we don't know total)
                             pb.pulse();
-                            pb.set_text(Some(&format!("Files scanned: {}", files_scanned)));
+                            if known_threats > 0 {
+                                pb.set_text(Some(&format!("Files scanned: {}  —  Threats found: {}", files_scanned, known_threats)));
+                            } else {
+                                pb.set_text(Some(&format!("Files scanned: {}", files_scanned)));
+                            }
                         }
                         Ok(ScanMessage::FileResult(result)) => {
+                            let row = Box::new(Orientation::Horizontal, 8);
+                            row.set_margin_start(8);
+                            row.set_margin_end(8);
+                            row.set_margin_top(4);
+                            row.set_margin_bottom(4);
+
+                            let icon = match result.status {
+                                crate::scanner::FileStatus::Infected => "⚠️",
+                                crate::scanner::FileStatus::Clean => "✅",
+                                _ => "❓",
+                            };
+                            let icon_label = Label::builder()
+                                .label(icon)
+                                .build();
+                            let path_label = Label::builder()
+                                .label(&crate::utils::truncate_path(&result.path, 60))
+                                .halign(Align::Start)
+                                .hexpand(true)
+                                .build();
+                            row.append(&icon_label);
+                            row.append(&path_label);
+
                             if result.status == crate::scanner::FileStatus::Infected {
                                 let threat = result.threat.unwrap_or_default();
-                                let row = Box::new(Orientation::Horizontal, 8);
-                                row.set_margin_start(8);
-                                row.set_margin_end(8);
-                                row.set_margin_top(4);
-                                row.set_margin_bottom(4);
-
-                                let icon = Label::builder()
-                                    .label("⚠️")
-                                    .build();
-                                let path_label = Label::builder()
-                                    .label(&crate::utils::truncate_path(&result.path, 60))
-                                    .halign(Align::Start)
-                                    .hexpand(true)
-                                    .build();
                                 let threat_label = Label::builder()
                                     .label(&threat)
                                     .css_classes(["status-bad"])
                                     .halign(Align::End)
                                     .build();
-
-                                row.append(&icon);
-                                row.append(&path_label);
                                 row.append(&threat_label);
 
-                                // Add quarantine button
                                 let q_btn = Button::builder()
                                     .label("Quarantine")
                                     .css_classes(["small-button"])
@@ -240,10 +250,10 @@ impl ScanPage {
                                         }
                                     }
                                 });
-
                                 row.append(&q_btn);
-                                rb.append(&row);
                             }
+
+                            rb.append(&row);
                         }
                         Ok(ScanMessage::Completed {
                             files_scanned,
@@ -334,8 +344,10 @@ impl ScanPage {
             });
         };
 
+        *start_scan_fn.borrow_mut() = Some(std::boxed::Box::new(start_scan));
+
         // File scan button
-        let start_scan_clone = start_scan.clone();
+        let start_scan_fn1 = start_scan_fn.clone();
         file_btn.connect_clicked(move |_| {
             let dialog = FileChooserDialog::builder()
                 .title("Select a File to Scan")
@@ -345,12 +357,14 @@ impl ScanPage {
             dialog.add_button("Cancel", ResponseType::Cancel);
             dialog.add_button("Scan", ResponseType::Accept);
 
-            let start = start_scan_clone.clone();
+            let sf = start_scan_fn1.clone();
             dialog.connect_response(move |dlg, resp| {
                 if resp == ResponseType::Accept {
                     if let Some(file) = dlg.file() {
                         if let Some(path) = file.path() {
-                            start(path, ScanType::File);
+                            if let Some(f) = sf.borrow().as_ref() {
+                                f(path, ScanType::File);
+                            }
                         }
                     }
                 }
@@ -361,7 +375,7 @@ impl ScanPage {
         });
 
         // Directory scan button
-        let start_scan_clone2 = start_scan.clone();
+        let start_scan_fn2 = start_scan_fn.clone();
         dir_btn.connect_clicked(move |_| {
             let dialog = FileChooserDialog::builder()
                 .title("Select a Directory to Scan")
@@ -371,12 +385,14 @@ impl ScanPage {
             dialog.add_button("Cancel", ResponseType::Cancel);
             dialog.add_button("Scan", ResponseType::Accept);
 
-            let start = start_scan_clone2.clone();
+            let sf = start_scan_fn2.clone();
             dialog.connect_response(move |dlg, resp| {
                 if resp == ResponseType::Accept {
                     if let Some(file) = dlg.file() {
                         if let Some(path) = file.path() {
-                            start(path, ScanType::Directory);
+                            if let Some(f) = sf.borrow().as_ref() {
+                                f(path, ScanType::Directory);
+                            }
                         }
                     }
                 }
@@ -387,18 +403,20 @@ impl ScanPage {
         });
 
         // Home scan button
-        let start_scan_clone3 = start_scan.clone();
+        let start_scan_fn3 = start_scan_fn.clone();
         home_btn.connect_clicked(move |_| {
-            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
-            start_scan_clone3(home, ScanType::Home);
+            if let Some(f) = start_scan_fn3.borrow().as_ref() {
+                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
+                f(home, ScanType::Home);
+            }
         });
 
         // Full system scan button
-        let start_scan_clone4 = start_scan.clone();
+        let start_scan_fn4 = start_scan_fn.clone();
         full_btn.connect_clicked(move |_| {
-            // Show confirmation dialog
-            // For simplicity, just start the scan
-            start_scan_clone4(PathBuf::from("/"), ScanType::FullSystem);
+            if let Some(f) = start_scan_fn4.borrow().as_ref() {
+                f(PathBuf::from("/"), ScanType::FullSystem);
+            }
         });
 
         // Cancel button
@@ -409,10 +427,18 @@ impl ScanPage {
 
         ScanPage {
             container,
+            start_scan_fn,
         }
     }
 
     pub fn container(&self) -> &Box {
         &self.container
+    }
+
+    pub fn scan_home(&self) {
+        if let Some(f) = self.start_scan_fn.borrow().as_ref() {
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
+            f(home, ScanType::Home);
+        }
     }
 }

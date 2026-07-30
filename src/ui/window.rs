@@ -1,3 +1,5 @@
+use std::rc::Rc;
+
 use gtk4::prelude::*;
 use gtk4::{
     Application, ApplicationWindow, Box, Button, HeaderBar, Label, ListBox, ListBoxRow,
@@ -84,8 +86,25 @@ impl MainWindow {
             .build();
 
         // Create pages
-        let dashboard = DashboardPage::new();
-        let scan_page = ScanPage::new();
+        let scan_page = Rc::new(ScanPage::new());
+
+        let stack_clone = stack.clone();
+        let stack_clone2 = stack.clone();
+        let stack_clone3 = stack.clone();
+        let scan_page_clone = scan_page.clone();
+        let dashboard = DashboardPage::new(
+            Some(std::boxed::Box::new(move || {
+                stack_clone.set_visible_child_name("scan");
+                scan_page_clone.scan_home();
+            })),
+            Some(std::boxed::Box::new(move || {
+                stack_clone3.set_visible_child_name("update");
+            })),
+            Some(std::boxed::Box::new(move || {
+                stack_clone2.set_visible_child_name("settings");
+            })),
+        );
+
         let update_page = UpdatePage::new();
         let quarantine_page = QuarantinePage::new();
         let history_page = HistoryPage::new();
