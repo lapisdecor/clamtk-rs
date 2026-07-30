@@ -1,11 +1,11 @@
 ![preview](clamtk-rs.png "Clamtk-rs")
 
 ## **Build & Run Instructions**  
-bash  
+  
 # Prerequisites  
-# - Rust toolchain (rustup.rs)  
-# - GTK4 development libraries  
-# - ClamAV installed (clamscan, freshclam)  
+ - Rust toolchain (rustup.rs)  
+ - GTK4 development libraries  
+ - ClamAV installed (clamscan, freshclam)  
    
 # Install GTK4 dev libraries (Ubuntu/Debian)  
 sudo apt install libgtk-4-dev libadwaita-1-dev  
