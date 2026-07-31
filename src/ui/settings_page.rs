@@ -2,7 +2,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Box, Button, CheckButton, Grid, Label, Orientation,
     SpinButton, Entry, Separator, Align, MessageDialog,
-    MessageType, ButtonsType, ResponseType,
+    MessageType, ButtonsType, ResponseType, ApplicationWindow,
 };
 
 use std::rc::Rc;
@@ -15,7 +15,7 @@ pub struct SettingsPage {
 }
 
 impl SettingsPage {
-    pub fn new() -> Self {
+    pub fn new(window: &ApplicationWindow) -> Self {
         let container = Box::new(Orientation::Vertical, 16);
         container.set_margin_start(24);
         container.set_margin_end(24);
@@ -342,6 +342,7 @@ impl SettingsPage {
         let history_limit_spin_r = history_limit_spin.clone();
         let q_entry_r = q_entry.clone();
         let excl_buffer_r = excl_buffer.clone();
+        let win = window.clone();
 
         reset_btn.connect_clicked(move |_| {
             let dialog = MessageDialog::builder()
@@ -349,6 +350,7 @@ impl SettingsPage {
                 .secondary_text("This will reset all settings to their default values.")
                 .message_type(MessageType::Question)
                 .buttons(ButtonsType::YesNo)
+                .transient_for(&win)
                 .build();
 
             let cfg_rc = config_rc2.clone();

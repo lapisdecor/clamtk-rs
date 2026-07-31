@@ -2,7 +2,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Box, Button, Label, Orientation, Separator,
     PolicyType, ScrolledWindow, Align, MessageDialog,
-    MessageType, ButtonsType, ResponseType,
+    MessageType, ButtonsType, ResponseType, ApplicationWindow,
 };
 
 pub struct HistoryPage {
@@ -10,7 +10,7 @@ pub struct HistoryPage {
 }
 
 impl HistoryPage {
-    pub fn new() -> Self {
+    pub fn new(window: &ApplicationWindow) -> Self {
         let container = Box::new(Orientation::Vertical, 16);
         container.set_margin_start(24);
         container.set_margin_end(24);
@@ -67,12 +67,14 @@ impl HistoryPage {
 
         // Clear button
         let eb3 = entries_box.clone();
+        let win = window.clone();
         clear_btn.connect_clicked(move |_| {
             let dialog = MessageDialog::builder()
                 .text("Clear Scan History?")
                 .secondary_text("This will permanently delete all scan history records.")
                 .message_type(MessageType::Warning)
                 .buttons(ButtonsType::YesNo)
+                .transient_for(&win)
                 .build();
 
             let eb = eb3.clone();

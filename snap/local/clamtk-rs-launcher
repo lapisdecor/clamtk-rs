@@ -27,4 +27,17 @@ fi
 export LD_LIBRARY_PATH="$SNAP/usr/lib/$triplet"
 export XDG_DATA_DIRS="$SNAP/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
 
+# The bundled GTK 4.14 cannot parse host themes written for newer GTK (e.g.
+# Yaru's "rgb(from ...)" syntax), and its GL/Vulkan stack cannot use the host
+# GPU drivers. Use the built-in Adwaita theme and the cairo renderer instead.
+case "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo '')" in
+    *prefer-dark*|*dark*)
+        export GTK_THEME="Adwaita:dark"
+        ;;
+    *)
+        export GTK_THEME="Adwaita"
+        ;;
+esac
+export GSK_RENDERER=cairo
+
 exec "$SNAP/bin/clamtk-rs" "$@"

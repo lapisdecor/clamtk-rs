@@ -2,7 +2,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Box, Button, Label, Orientation,
     PolicyType, ScrolledWindow, Align, MessageDialog, MessageType,
-    ButtonsType, ResponseType,
+    ButtonsType, ResponseType, ApplicationWindow,
 };
 
 pub struct QuarantinePage {
@@ -10,7 +10,7 @@ pub struct QuarantinePage {
 }
 
 impl QuarantinePage {
-    pub fn new() -> Self {
+    pub fn new(window: &ApplicationWindow) -> Self {
         let container = Box::new(Orientation::Vertical, 16);
         container.set_margin_start(24);
         container.set_margin_end(24);
@@ -76,6 +76,7 @@ impl QuarantinePage {
 
         // Wire up purge button
         let entries_box_clone2 = entries_box.clone();
+        let win = window.clone();
         purge_btn.connect_clicked(move |_| {
             // Show confirmation dialog
             let dialog = MessageDialog::builder()
@@ -83,6 +84,7 @@ impl QuarantinePage {
                 .secondary_text("This will permanently delete all quarantined files. This cannot be undone.")
                 .message_type(MessageType::Warning)
                 .buttons(ButtonsType::YesNo)
+                .transient_for(&win)
                 .build();
 
             let eb = entries_box_clone2.clone();

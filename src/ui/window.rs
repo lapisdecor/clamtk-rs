@@ -86,7 +86,7 @@ impl MainWindow {
             .build();
 
         // Create pages
-        let scan_page = Rc::new(ScanPage::new());
+        let scan_page = Rc::new(ScanPage::new(&window));
 
         let stack_clone = stack.clone();
         let stack_clone2 = stack.clone();
@@ -106,9 +106,9 @@ impl MainWindow {
         );
 
         let update_page = UpdatePage::new();
-        let quarantine_page = QuarantinePage::new();
-        let history_page = HistoryPage::new();
-        let settings_page = SettingsPage::new();
+        let quarantine_page = QuarantinePage::new(&window);
+        let history_page = HistoryPage::new(&window);
+        let settings_page = SettingsPage::new(&window);
 
         // Add pages to stack
         stack.add_titled(dashboard.container(), Some("dashboard"), "Dashboard");

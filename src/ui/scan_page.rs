@@ -2,7 +2,7 @@ use gtk4::prelude::*;
 use gtk4::{
     Box, Button, FileChooserDialog, FileChooserAction,
     Label, Orientation, ProgressBar, PolicyType,
-    ScrolledWindow, Align, ResponseType,
+    ScrolledWindow, Align, ResponseType, ApplicationWindow,
 };
 
 use std::path::PathBuf;
@@ -18,7 +18,7 @@ pub struct ScanPage {
 }
 
 impl ScanPage {
-    pub fn new() -> Self {
+    pub fn new(window: &ApplicationWindow) -> Self {
         let container = Box::new(Orientation::Vertical, 16);
         container.set_margin_start(24);
         container.set_margin_end(24);
@@ -348,10 +348,12 @@ impl ScanPage {
 
         // File scan button
         let start_scan_fn1 = start_scan_fn.clone();
+        let win = window.clone();
         file_btn.connect_clicked(move |_| {
             let dialog = FileChooserDialog::builder()
                 .title("Select a File to Scan")
                 .action(FileChooserAction::Open)
+                .transient_for(&win)
                 .build();
 
             dialog.add_button("Cancel", ResponseType::Cancel);
@@ -376,10 +378,12 @@ impl ScanPage {
 
         // Directory scan button
         let start_scan_fn2 = start_scan_fn.clone();
+        let win2 = window.clone();
         dir_btn.connect_clicked(move |_| {
             let dialog = FileChooserDialog::builder()
                 .title("Select a Directory to Scan")
                 .action(FileChooserAction::SelectFolder)
+                .transient_for(&win2)
                 .build();
 
             dialog.add_button("Cancel", ResponseType::Cancel);
