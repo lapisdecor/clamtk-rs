@@ -21,11 +21,19 @@ else
     esac
 fi
 
-# Bundled GTK4/GLib runtime libraries. Overwrite LD_LIBRARY_PATH so the
-# classic-snap environment (host glibc) is used consistently instead of
-# mixing core24 libc with host libraries.
+# Bundled GTK4/GLib runtime libraries. Binaries are patched at build time to
+# use the core24 dynamic loader and rpaths, so LD_LIBRARY_PATH only needs to
+# cover dlopen'd modules (gdk-pixbuf loaders, gio modules) not reachable via
+# rpath.
 export LD_LIBRARY_PATH="$SNAP/usr/lib/$triplet"
 export XDG_DATA_DIRS="$SNAP/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+
+# GIO's compiled-in module directory (/usr/lib/x86_64-linux-gnu/gio/modules)
+# is the HOST's on a classic snap. Its gvfs modules were built against a newer
+# GLib than core24's, so loading them fails with
+# "undefined symbol: g_variant_builder_init_static". Point GIO at the modules
+# bundled with the snap instead.
+export GIO_MODULE_DIR="$SNAP/usr/lib/$triplet/gio/modules"
 
 # The bundled GTK 4.14 cannot parse host themes written for newer GTK (e.g.
 # Yaru's "rgb(from ...)" syntax), and its GL/Vulkan stack cannot use the host

@@ -10,7 +10,7 @@ pub fn show_about_dialog(parent: &Window) {
         .comments("A GTK4 graphical frontend for ClamAV — Rust port of ClamTK")
         .copyright("© 2026 ClamTK Rust Contributors")
         .license_type(License::Gpl30)
-        .website("https://github.com/clamtk-rs/clamtk-rs")
+        .website("https://github.com/lapisdecor/clamtk-rs")
         .authors(vec![
             "ClamTK Rust Contributors"
         ])

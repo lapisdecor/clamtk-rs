@@ -2,6 +2,11 @@ name: clamtk-rs
 base: core24
 version: '1.0.0'
 summary: A GTK4 graphical frontend for ClamAV
+title: ClamTK-rs
+contact: lapisdecor@gmail.com
+issues: https://github.com/lapisdecor/clamtk-rs/issues
+source-code: https://github.com/lapisdecor/clamtk-rs
+website: https://github.com/lapisdecor/clamtk-rs
 description: |
   Clamtk-rs is a lightweight, user-friendly graphical frontend for ClamAV
   written in Rust with GTK4. It provides on-demand virus scanning, virus
@@ -17,6 +22,14 @@ grade: stable
 confinement: classic
 icon: data/icons/com.clamtk.rs.png
 
+lint:
+  ignore:
+    - library:
+      - usr/lib/x86_64-linux-gnu/libGLESv2.so*
+      - usr/lib/x86_64-linux-gnu/libGLdispatch.so*
+      - usr/lib/x86_64-linux-gnu/libcolordprivate.so*
+      - usr/lib/x86_64-linux-gnu/libdconf.so*
+
 apps:
   clamtk-rs:
     command: bin/clamtk-rs-launcher
@@ -27,19 +40,39 @@ parts:
   clamtk-rs:
     plugin: rust
     source: .
+    rust-channel: stable
     rust-inherit-ldflags: true
+    build-attributes:
+      - enable-patchelf
     build-packages:
       - build-essential
       - libgtk-4-dev
       - libglib2.0-dev-bin
+      - patchelf
     stage-packages:
       - libgtk-4-1
+    stage:
+      - -usr/lib/x86_64-linux-gnu/libicui18n.so.74
+      - -usr/lib/x86_64-linux-gnu/libicui18n.so.74.2
+      - -usr/lib/x86_64-linux-gnu/libicuio.so.74
+      - -usr/lib/x86_64-linux-gnu/libicuio.so.74.2
+      - -usr/lib/x86_64-linux-gnu/libicutest.so.74
+      - -usr/lib/x86_64-linux-gnu/libicutest.so.74.2
+      - -usr/lib/x86_64-linux-gnu/libicutu.so.74
+      - -usr/lib/x86_64-linux-gnu/libicutu.so.74.2
     build-environment:
       - LDFLAGS: "-Wl,-rpath=\\$ORIGIN/../usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR"
-    override-prime: |
-      set -eux
-      craftctl default
-      install -D -m755 "$CRAFT_PROJECT_DIR/snap/local/clamtk-rs-launcher" "$CRAFT_PRIME/bin/clamtk-rs-launcher"
-      install -D -m644 "$CRAFT_PROJECT_DIR/data/com.clamtk.rs.desktop" "$CRAFT_PRIME/data/com.clamtk.rs.desktop"
-      install -D -m644 "$CRAFT_PROJECT_DIR/data/icons/scalable/apps/com.clamtk.rs.svg" "$CRAFT_PRIME/usr/share/icons/hicolor/scalable/apps/com.clamtk.rs.svg"
-      install -D -m644 "$CRAFT_PROJECT_DIR/data/icons/com.clamtk.rs.png" "$CRAFT_PRIME/usr/share/icons/hicolor/512x512/apps/com.clamtk.rs.png"
+
+  launcher:
+    plugin: dump
+    source: snap/local
+    organize:
+      clamtk-rs-launcher: bin/clamtk-rs-launcher
+
+  desktop:
+    plugin: dump
+    source: data
+    organize:
+      com.clamtk.rs.desktop: data/com.clamtk.rs.desktop
+      icons/scalable/apps/com.clamtk.rs.svg: usr/share/icons/hicolor/scalable/apps/com.clamtk.rs.svg
+      icons/com.clamtk.rs.png: usr/share/icons/hicolor/512x512/apps/com.clamtk.rs.png
