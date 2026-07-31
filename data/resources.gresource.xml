@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <gresources>
   <gresource prefix="/com/clamtk/rs">
-    <!-- Add custom icons/styles here if needed -->
+    <file alias="icons/scalable/apps/com.clamtk.rs.svg">icons/scalable/apps/com.clamtk.rs.svg</file>
   </gresource>
 </gresources>

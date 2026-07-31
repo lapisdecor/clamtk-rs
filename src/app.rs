@@ -26,6 +26,12 @@ impl App {
         self.gtk_app.connect_startup(|gtk_app| {
             // Load resources
             gtk_app.set_resource_base_path(Some("/com/clamtk/rs"));
+
+            // Make the bundled app icon available to the icon theme
+            if let Some(display) = gtk4::gdk::Display::default() {
+                gtk4::IconTheme::for_display(&display)
+                    .add_resource_path("/com/clamtk/rs/icons");
+            }
         });
 
         self.gtk_app.connect_activate(|gtk_app| {

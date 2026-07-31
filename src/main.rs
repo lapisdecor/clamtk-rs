@@ -10,6 +10,9 @@ mod utils;
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
+    // Register the compiled gresource (bundled app icon)
+    let _ = gio::resources_register_include!("clamtk_rs.gresource");
+
     // Ensure config directories exist
     config::ensure_dirs()?;
 

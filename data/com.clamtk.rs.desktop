@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=ClamTK Rust
+GenericName=Virus Scanner
+Comment=Graphical frontend for ClamAV
+Exec=clamtk-rs
+Icon=com.clamtk.rs
+Terminal=false
+Categories=System;Security;Utility;
+Keywords=antivirus;virus;scan;clamav;clamtk;security;

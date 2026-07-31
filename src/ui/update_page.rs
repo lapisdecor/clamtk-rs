@@ -5,6 +5,11 @@ use gtk4::{
 use std::process::Command;
 use std::sync::mpsc;
 
+enum UpdateMessage {
+    Status(String),
+    Done(anyhow::Result<String>),
+}
+
 pub struct UpdatePage {
     container: Box,
 }
@@ -19,7 +24,7 @@ impl UpdatePage {
 
         // Title
         let title = Label::builder()
-            .label("<big><b>Update Signatures</b></big>")
+            .label("<big><b>Update Signatures (asks password several times)</b></big>")
             .use_markup(true)
             .halign(Align::Start)
             .build();
@@ -100,10 +105,10 @@ impl UpdatePage {
         spacer.set_vexpand(true);
         container.append(&spacer);
 
-        // Note about sudo
+        // Note about privileges
         let note = Label::builder()
-            .label("<i>Note: Updating signatures typically requires root privileges.\n\
-                    The update will attempt to run with pkexec if needed.</i>")
+            .label("<i>Note: Updating signatures requires root privileges. The freshclam \
+                    service will be stopped before the update and started again afterwards.</i>")
             .use_markup(true)
             .halign(Align::Start)
             .css_classes(["dim-label"])
@@ -125,10 +130,12 @@ impl UpdatePage {
 
             let (tx, rx) = mpsc::channel();
 
-            // Run freshclam in a thread
+            // Run the update sequence in a thread
             std::thread::spawn(move || {
-                let result = run_freshclam();
-                let _ = tx.send(result);
+                let result = run_freshclam(|status| {
+                    let _ = tx.send(UpdateMessage::Status(status.to_string()));
+                });
+                let _ = tx.send(UpdateMessage::Done(result));
             });
 
             let pb = progress_bar_clone.clone();
@@ -140,7 +147,10 @@ impl UpdatePage {
                 loop {
                     let _ = glib::timeout_future(std::time::Duration::from_millis(100)).await;
                     match rx.try_recv() {
-                        Ok(Ok(output)) => {
+                        Ok(UpdateMessage::Status(status)) => {
+                            sl.set_label(&status);
+                        }
+                        Ok(UpdateMessage::Done(Ok(output))) => {
                             pb.set_fraction(1.0);
                             pb.set_text(Some("Update complete"));
 
@@ -159,7 +169,7 @@ impl UpdatePage {
                             btn.set_sensitive(true);
                             return;
                         }
-                        Ok(Err(e)) => {
+                        Ok(UpdateMessage::Done(Err(e))) => {
                             pb.set_fraction(0.0);
                             pb.set_text(Some("Update failed"));
                             sl.set_label(&format!("❌ Update failed: {}", e));
@@ -183,22 +193,46 @@ impl UpdatePage {
     }
 }
 
-fn run_freshclam() -> anyhow::Result<String> {
-    // Try running freshclam directly first, then with pkexec
-    let output = Command::new("freshclam")
+fn run_freshclam<F: FnMut(&str)>(mut on_status: F) -> anyhow::Result<String> {
+    let mut log = Vec::new();
+
+    on_status("Stopping freshclam service...");
+    match run_privileged("service clamav-freshclam stop") {
+        Ok(out) => log.push(format!("Freshclam service stopped.\n{}", out)),
+        Err(e) => log.push(format!("Note: could not stop freshclam service: {}", e)),
+    }
+
+    on_status("Updating virus signatures (root password required)...");
+    let update_output = match run_privileged("freshclam") {
+        Ok(out) => out,
+        Err(e) => {
+            let _ = run_privileged("service clamav-freshclam start");
+            anyhow::bail!("Signature update failed: {}", e);
+        }
+    };
+
+    on_status("Starting freshclam service...");
+    match run_privileged("service clamav-freshclam start") {
+        Ok(out) => log.push(format!("Freshclam service started.\n{}", out)),
+        Err(e) => log.push(format!("Note: could not restart freshclam service: {}", e)),
+    }
+
+    Ok(format!("{}\n{}", update_output, log.join("\n")).trim().to_string())
+}
+
+fn run_privileged(script: &str) -> anyhow::Result<String> {
+    let output = Command::new("pkexec")
+        .arg("sh")
+        .arg("-c")
+        .arg(script)
         .output()
-        .or_else(|_| {
-            Command::new("pkexec")
-                .arg("freshclam")
-                .output()
-        })
-        .map_err(|e| anyhow::anyhow!("Failed to run freshclam: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("Failed to launch pkexec: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
-    if !output.status.success() && stdout.is_empty() {
-        anyhow::bail!("freshclam exited with error: {}", stderr);
+    if !output.status.success() {
+        anyhow::bail!("{}", stderr.trim());
     }
 
     Ok(format!("{}\n{}", stdout, stderr).trim().to_string())

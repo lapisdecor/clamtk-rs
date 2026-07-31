@@ -26,4 +26,12 @@ cargo run --release
    
 # Or install system-wide  
 sudo cargo install --path .  
-   
+  
+# Build a snap (classic confinement)  
+sudo snap install snapcraft  
+cd clamtk-rs  
+snapcraft pack  
+  
+# Install the built snap  
+sudo snap install --dangerous ./clamtk-rs_1.0.0_amd64.snap  
+ 

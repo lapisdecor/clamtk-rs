@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+# SNAP_ARCH_TRIPLET is only provided by the GNOME extension, so compute it
+# from the system architecture when it is not set.
+if [ -n "${SNAP_ARCH_TRIPLET:-}" ]; then
+    triplet="$SNAP_ARCH_TRIPLET"
+else
+    case "$(uname -m)" in
+        x86_64) triplet="x86_64-linux-gnu" ;;
+        aarch64) triplet="aarch64-linux-gnu" ;;
+        armv7l|armhf) triplet="arm-linux-gnueabihf" ;;
+        i686|i386) triplet="i386-linux-gnu" ;;
+        powerpc64le|ppc64el) triplet="powerpc64le-linux-gnu" ;;
+        s390x) triplet="s390x-linux-gnu" ;;
+        riscv64) triplet="riscv64-linux-gnu" ;;
+        *)
+            echo "clamtk-rs: unsupported architecture $(uname -m)" >&2
+            exit 1
+            ;;
+    esac
+fi
+
+# Bundled GTK4/GLib runtime libraries. Overwrite LD_LIBRARY_PATH so the
+# classic-snap environment (host glibc) is used consistently instead of
+# mixing core24 libc with host libraries.
+export LD_LIBRARY_PATH="$SNAP/usr/lib/$triplet"
+export XDG_DATA_DIRS="$SNAP/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+
+exec "$SNAP/bin/clamtk-rs" "$@"

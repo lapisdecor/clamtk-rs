@@ -1,0 +1,45 @@
+name: clamtk-rs
+base: core24
+version: '1.0.0'
+summary: A GTK4 graphical frontend for ClamAV
+description: |
+  Clamtk-rs is a lightweight, user-friendly graphical frontend for ClamAV
+  written in Rust with GTK4. It provides on-demand virus scanning, virus
+  signature updates (freshclam), a quarantine manager, scan history and
+  detailed scan settings.
+
+  This snap uses classic confinement because the application integrates with
+  the system ClamAV installation (clamscan, freshclam, clamd) and must be able
+  to manage the clamav-freshclam service and prompt for the root password
+  (pkexec) when updating signatures.
+license: GPL-3.0-or-later
+grade: stable
+confinement: classic
+icon: data/icons/com.clamtk.rs.png
+
+apps:
+  clamtk-rs:
+    command: bin/clamtk-rs-launcher
+    desktop: data/com.clamtk.rs.desktop
+    common-id: com.clamtk.rs
+
+parts:
+  clamtk-rs:
+    plugin: rust
+    source: .
+    rust-inherit-ldflags: true
+    build-packages:
+      - build-essential
+      - libgtk-4-dev
+      - libglib2.0-dev-bin
+    stage-packages:
+      - libgtk-4-1
+    build-environment:
+      - LDFLAGS: "-Wl,-rpath=\\$ORIGIN/../usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR"
+    override-prime: |
+      set -eux
+      craftctl default
+      install -D -m755 "$CRAFT_PROJECT_DIR/snap/local/clamtk-rs-launcher" "$CRAFT_PRIME/bin/clamtk-rs-launcher"
+      install -D -m644 "$CRAFT_PROJECT_DIR/data/com.clamtk.rs.desktop" "$CRAFT_PRIME/data/com.clamtk.rs.desktop"
+      install -D -m644 "$CRAFT_PROJECT_DIR/data/icons/scalable/apps/com.clamtk.rs.svg" "$CRAFT_PRIME/usr/share/icons/hicolor/scalable/apps/com.clamtk.rs.svg"
+      install -D -m644 "$CRAFT_PROJECT_DIR/data/icons/com.clamtk.rs.png" "$CRAFT_PRIME/usr/share/icons/hicolor/512x512/apps/com.clamtk.rs.png"
