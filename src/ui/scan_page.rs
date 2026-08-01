@@ -410,8 +410,7 @@ impl ScanPage {
         let start_scan_fn3 = start_scan_fn.clone();
         home_btn.connect_clicked(move |_| {
             if let Some(f) = start_scan_fn3.borrow().as_ref() {
-                let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
-                f(home, ScanType::Home);
+                f(crate::utils::real_home_dir(), ScanType::Home);
             }
         });
 
@@ -441,8 +440,7 @@ impl ScanPage {
 
     pub fn scan_home(&self) {
         if let Some(f) = self.start_scan_fn.borrow().as_ref() {
-            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/home"));
-            f(home, ScanType::Home);
+            f(crate::utils::real_home_dir(), ScanType::Home);
         }
     }
 }

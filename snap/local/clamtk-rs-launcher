@@ -21,24 +21,21 @@ else
     esac
 fi
 
-# Bundled GTK4/GLib runtime libraries. Binaries are patched at build time to
-# use the core24 dynamic loader and rpaths, so LD_LIBRARY_PATH only needs to
-# cover dlopen'd modules (gdk-pixbuf loaders, gio modules) not reachable via
-# rpath.
-export LD_LIBRARY_PATH="$SNAP/usr/lib/$triplet"
-export XDG_DATA_DIRS="$SNAP/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+# The bundled ClamAV (clamscan, freshclam) lives under $SNAP/usr.
+export PATH="$SNAP/usr/bin${PATH:+:$PATH}"
 
-# GIO's compiled-in module directory (/usr/lib/x86_64-linux-gnu/gio/modules)
-# is the HOST's on a classic snap. Its gvfs modules were built against a newer
-# GLib than core24's, so loading them fails with
-# "undefined symbol: g_variant_builder_init_static". Point GIO at the modules
-# bundled with the snap instead.
-export GIO_MODULE_DIR="$SNAP/usr/lib/$triplet/gio/modules"
+# The GNOME extension (via SNAP_DESKTOP_RUNTIME) already sets LD_LIBRARY_PATH
+# for the GTK/GLib stack; add the bundled ClamAV libraries from $SNAP/usr.
+export LD_LIBRARY_PATH="$SNAP/usr/lib/$triplet${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
-# The bundled GTK 4.14 cannot parse host themes written for newer GTK (e.g.
-# Yaru's "rgb(from ...)" syntax), and its GL/Vulkan stack cannot use the host
-# GPU drivers. Use the built-in Adwaita theme and the cairo renderer instead.
-case "$(gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null || echo '')" in
+# GTK provided by the gnome-platform content snap is newer than the host's, so
+# host themes written for newer GTK (e.g. Yaru's "rgb(from ...)" syntax) cannot
+# be parsed. Use the built-in Adwaita theme and the cairo renderer instead.
+gsettings_bin="${SNAP_DESKTOP_RUNTIME:+$SNAP_DESKTOP_RUNTIME/usr/bin/}gsettings"
+if [ ! -x "$gsettings_bin" ]; then
+    gsettings_bin="gsettings"
+fi
+case "$("$gsettings_bin" get org.gnome.desktop.interface color-scheme 2>/dev/null || echo '')" in
     *prefer-dark*|*dark*)
         export GTK_THEME="Adwaita:dark"
         ;;

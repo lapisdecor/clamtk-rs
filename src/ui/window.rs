@@ -92,7 +92,7 @@ impl MainWindow {
         let stack_clone2 = stack.clone();
         let stack_clone3 = stack.clone();
         let scan_page_clone = scan_page.clone();
-        let dashboard = DashboardPage::new(
+        let dashboard = Rc::new(DashboardPage::new(
             Some(std::boxed::Box::new(move || {
                 stack_clone.set_visible_child_name("scan");
                 scan_page_clone.scan_home();
@@ -103,7 +103,7 @@ impl MainWindow {
             Some(std::boxed::Box::new(move || {
                 stack_clone2.set_visible_child_name("settings");
             })),
-        );
+        ));
 
         let update_page = UpdatePage::new();
         let quarantine_page = QuarantinePage::new(&window);
@@ -148,6 +148,16 @@ impl MainWindow {
                         child = c.next_sibling();
                     }
                 }
+            }
+        });
+
+        // Refresh the dashboard's ClamAV info whenever it is shown, so it
+        // reflects a virus database downloaded after startup (e.g. on the
+        // first scan) or a manual signature update.
+        let dashboard_refresh = dashboard.clone();
+        stack.connect_visible_child_name_notify(move |stack| {
+            if stack.visible_child_name().as_deref() == Some("dashboard") {
+                dashboard_refresh.refresh();
             }
         });
 

@@ -8,6 +8,11 @@ use crate::clamav;
 
 pub struct DashboardPage {
     container: Box,
+    status_value: Label,
+    version_value: Label,
+    sig_value: Label,
+    sig_ver_value: Label,
+    cd_value: Label,
 }
 
 impl DashboardPage {
@@ -223,7 +228,46 @@ impl DashboardPage {
             .build();
         container.append(&footer);
 
-        DashboardPage { container }
+        DashboardPage {
+            container,
+            status_value,
+            version_value,
+            sig_value,
+            sig_ver_value,
+            cd_value,
+        }
+    }
+
+    /// Re-detect the ClamAV information and update the shown values. Called
+    /// whenever the dashboard becomes visible so that it reflects a virus
+    /// database downloaded after startup (e.g. on the first scan).
+    pub fn refresh(&self) {
+        let info = clamav::refresh_info();
+
+        if info.is_clamscan_available {
+            self.status_value.set_label("● Active");
+            self.status_value.set_css_classes(&["status-good"]);
+        } else {
+            self.status_value.set_label("● Not Found");
+            self.status_value.set_css_classes(&["status-bad"]);
+        }
+
+        self.version_value.set_label(&info.build_info);
+        self.sig_value.set_label(&info.signature_count);
+        self.sig_ver_value.set_label(&info.signature_version);
+
+        if info.is_clamd_available {
+            if clamav::is_clamd_running() {
+                self.cd_value.set_label("● Running");
+                self.cd_value.set_css_classes(&["status-good"]);
+            } else {
+                self.cd_value.set_label("● Available (not running)");
+                self.cd_value.set_css_classes(&["status-warn"]);
+            }
+        } else {
+            self.cd_value.set_label("● Not Available");
+            self.cd_value.set_css_classes(&["status-bad"]);
+        }
     }
 
     pub fn container(&self) -> &Box {

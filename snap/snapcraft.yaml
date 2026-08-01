@@ -13,28 +13,30 @@ description: |
   signature updates (freshclam), a quarantine manager, scan history and
   detailed scan settings.
 
-  This snap uses classic confinement because the application integrates with
-  the system ClamAV installation (clamscan, freshclam, clamd) and must be able
-  to manage the clamav-freshclam service and prompt for the root password
-  (pkexec) when updating signatures.
+  The snap bundles its own ClamAV (clamscan and freshclam) and runs under
+  strict confinement. Virus definitions are downloaded automatically on the
+  first scan and can be refreshed from the Update Signatures page.
 license: GPL-3.0-or-later
 grade: stable
-confinement: classic
+confinement: strict
 icon: data/icons/com.clamtk.rs.png
 
-lint:
-  ignore:
-    - library:
-      - usr/lib/x86_64-linux-gnu/libGLESv2.so*
-      - usr/lib/x86_64-linux-gnu/libGLdispatch.so*
-      - usr/lib/x86_64-linux-gnu/libcolordprivate.so*
-      - usr/lib/x86_64-linux-gnu/libdconf.so*
+slots:
+  dbus-svc:
+    interface: dbus
+    bus: session
+    name: com.clamtk.rs
 
 apps:
   clamtk-rs:
     command: bin/clamtk-rs-launcher
+    extensions: [gnome]
     desktop: data/com.clamtk.rs.desktop
     common-id: com.clamtk.rs
+    plugs:
+      - home
+      - network
+      - mount-observe
 
 parts:
   clamtk-rs:
@@ -50,17 +52,11 @@ parts:
       - libglib2.0-dev-bin
       - patchelf
     stage-packages:
-      - libgtk-4-1
-    stage:
-      - -usr/lib/x86_64-linux-gnu/libicui18n.so.74
-      - -usr/lib/x86_64-linux-gnu/libicui18n.so.74.2
-      - -usr/lib/x86_64-linux-gnu/libicuio.so.74
-      - -usr/lib/x86_64-linux-gnu/libicuio.so.74.2
-      - -usr/lib/x86_64-linux-gnu/libicutest.so.74
-      - -usr/lib/x86_64-linux-gnu/libicutest.so.74.2
-      - -usr/lib/x86_64-linux-gnu/libicutu.so.74
-      - -usr/lib/x86_64-linux-gnu/libicutu.so.74.2
+      - clamav
+      - clamav-freshclam
     build-environment:
+      - PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
+      - LD_LIBRARY_PATH: ""
       - LDFLAGS: "-Wl,-rpath=\\$ORIGIN/../usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR"
 
   launcher:

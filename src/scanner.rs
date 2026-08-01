@@ -105,6 +105,40 @@ impl Scanner {
             });
 
             let mut args = config.to_clamscan_args();
+
+            // Inside a snap the bundled freshclam writes the signature database
+            // to the snap's writable data directory, so clamscan must be told
+            // where to find it. Download it first if it is not there yet.
+            if crate::utils::is_running_in_snap() {
+                let needs_download = !crate::clamav::snap_database_available();
+                if needs_download {
+                    let _ = tx.send(ScanMessage::Progress {
+                        current_file: "Downloading virus definitions (first run)...".into(),
+                        files_scanned: 0,
+                        known_threats: 0,
+                    });
+                }
+                if let Err(e) = crate::clamav::ensure_database() {
+                    let _ = tx.send(ScanMessage::Error(format!(
+                        "Could not prepare the virus database: {}",
+                        e
+                    )));
+                    return;
+                }
+
+                if let Some(db_dir) = crate::utils::snap_database_dir() {
+                    args.push("--database".into());
+                    args.push(db_dir.to_string_lossy().to_string());
+                }
+
+                // The compiled-in certificate path refers to the host's
+                // /etc/clamav/certs, which strict confinement blocks.
+                if let Some(certs_dir) = crate::utils::snap_cvdcerts_dir() {
+                    args.push("--cvdcertsdir".into());
+                    args.push(certs_dir.to_string_lossy().to_string());
+                }
+            }
+
             args.push(target_str.clone());
 
             let mut cmd = Command::new("clamscan");
