@@ -19,20 +19,20 @@ description: |
 license: GPL-3.0-or-later
 grade: stable
 confinement: strict
-icon: data/icons/com.clamtk.rs.png
+icon: data/icons/com.gatochalupa.clamtk-rs.png
 
 slots:
   dbus-svc:
     interface: dbus
     bus: session
-    name: com.clamtk.rs
+    name: com.gatochalupa.clamtk-rs
 
 apps:
   clamtk-rs:
     command: bin/clamtk-rs-launcher
     extensions: [gnome]
-    desktop: data/com.clamtk.rs.desktop
-    common-id: com.clamtk.rs
+    desktop: data/com.gatochalupa.clamtk-rs.desktop
+    common-id: com.gatochalupa.clamtk-rs
     plugs:
       - home
       - network
@@ -69,6 +69,6 @@ parts:
     plugin: dump
     source: data
     organize:
-      com.clamtk.rs.desktop: data/com.clamtk.rs.desktop
-      icons/scalable/apps/com.clamtk.rs.svg: usr/share/icons/hicolor/scalable/apps/com.clamtk.rs.svg
-      icons/com.clamtk.rs.png: usr/share/icons/hicolor/512x512/apps/com.clamtk.rs.png
+      com.gatochalupa.clamtk-rs.desktop: data/com.gatochalupa.clamtk-rs.desktop
+      icons/scalable/apps/com.gatochalupa.clamtk-rs.svg: usr/share/icons/hicolor/scalable/apps/com.gatochalupa.clamtk-rs.svg
+      icons/com.gatochalupa.clamtk-rs.png: usr/share/icons/hicolor/512x512/apps/com.gatochalupa.clamtk-rs.png

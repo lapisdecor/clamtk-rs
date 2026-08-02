@@ -26,7 +26,7 @@ impl MainWindow {
             .title("ClamTK Rust")
             .default_width(950)
             .default_height(650)
-            .icon_name("com.clamtk.rs")
+            .icon_name("com.gatochalupa.clamtk-rs")
             .build();
 
         // Apply custom CSS

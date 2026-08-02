@@ -4,7 +4,7 @@ use glib::ExitCode;
 
 use crate::ui::window::MainWindow;
 
-const APP_ID: &str = "com.clamtk.rs";
+const APP_ID: &str = "com.gatochalupa.clamtk-rs";
 
 pub struct App {
     gtk_app: Application,
@@ -25,12 +25,12 @@ impl App {
     fn setup_signals(&self) {
         self.gtk_app.connect_startup(|gtk_app| {
             // Load resources
-            gtk_app.set_resource_base_path(Some("/com/clamtk/rs"));
+            gtk_app.set_resource_base_path(Some("/com/gatochalupa/clamtk-rs"));
 
             // Make the bundled app icon available to the icon theme
             if let Some(display) = gtk4::gdk::Display::default() {
                 gtk4::IconTheme::for_display(&display)
-                    .add_resource_path("/com/clamtk/rs/icons");
+                    .add_resource_path("/com/gatochalupa/clamtk-rs/icons");
             }
         });
 

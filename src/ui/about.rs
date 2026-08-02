@@ -21,7 +21,7 @@ pub fn show_about_dialog(parent: &Window) {
         .documenters(vec![
             "ClamAV Documentation",
         ])
-        .logo_icon_name("com.clamtk.rs")
+        .logo_icon_name("com.gatochalupa.clamtk-rs")
         .build();
 
     dialog.present();
