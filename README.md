@@ -1,7 +1,7 @@
 ![preview](clamtk-rs.png "Clamtk-rs")
 
 # **Build & Run Instructions**  
-You have several choices.
+You have two choices. You can compile the code and install clamav or you can make a snap which is bundled with clamav.
   
 ## Prerequisites
 If you want to build from source you will need:  
