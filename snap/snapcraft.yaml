@@ -37,6 +37,7 @@ apps:
       - home
       - network
       - mount-observe
+      - removable-media
 
 parts:
   clamtk-rs:
