@@ -5,7 +5,7 @@ platforms:
     build-on: [amd64]
     build-for: [amd64]
   arm64:
-    build-on: [amd64]
+    build-on: [arm64]
     build-for: [arm64]
 version: '1.0.0'
 summary: A GTK4 graphical frontend for ClamAV
