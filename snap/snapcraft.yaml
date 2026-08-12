@@ -43,8 +43,6 @@ apps:
     plugs:
       - home
       - network
-      - mount-observe
-      - removable-media
 
 parts:
   clamtk-rs:
