@@ -43,6 +43,7 @@ apps:
     plugs:
       - home
       - network
+      - removable-media
 
 parts:
   clamtk-rs:
