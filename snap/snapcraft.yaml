@@ -44,6 +44,7 @@ apps:
       - home
       - network
       - removable-media
+      - audio-playback
 
 parts:
   clamtk-rs:
@@ -61,6 +62,11 @@ parts:
     stage-packages:
       - clamav
       - clamav-freshclam
+      - pulseaudio-utils
+    # pulseaudio-utils is staged for its `paplay` binary, which links against
+    # libpulse (not libpulse-simple); drop the unused library the package pulls in.
+    stage:
+      - -usr/lib/*/libpulse-simple.so*
     build-environment:
       - PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
       - LD_LIBRARY_PATH: ""

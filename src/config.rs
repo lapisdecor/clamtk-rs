@@ -3,8 +3,14 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
+    #[serde(default = "default_true")]
+    pub play_sound_on_complete: bool,
     pub scan_archives: bool,
     pub scan_elf: bool,
     pub scan_pdf: bool,
@@ -28,6 +34,7 @@ impl Default for AppConfig {
             .join("quarantine");
 
         Self {
+            play_sound_on_complete: true,
             scan_archives: true,
             scan_elf: true,
             scan_pdf: true,
@@ -162,4 +169,43 @@ pub fn ensure_dirs() -> Result<()> {
     fs::create_dir_all(&quarantine_dir)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn roundtrip_play_sound() {
+        let mut c = AppConfig::default();
+        c.play_sound_on_complete = false;
+        let json = serde_json::to_string(&c).unwrap();
+        println!("serialized: {}", json);
+        assert!(json.contains("\"play_sound_on_complete\":false"));
+        let back: AppConfig = serde_json::from_str(&json).unwrap();
+        assert!(!back.play_sound_on_complete);
+    }
+
+    #[test]
+    fn old_config_defaults_to_true() {
+        // A config written before this option existed (all other fields
+        // present, play_sound_on_complete missing) must default to true.
+        let old = r#"{
+            "scan_archives": true,
+            "scan_elf": true,
+            "scan_pdf": true,
+            "scan_mail": true,
+            "scan_ole2": true,
+            "detect_pua": false,
+            "heuristic_scan": true,
+            "scan_follow_symlinks": false,
+            "exclude_paths": ["/proc", "/sys", "/dev"],
+            "max_file_size_mb": 25,
+            "max_scan_time_sec": 600,
+            "quarantine_dir": "/tmp/q",
+            "history_limit": 100
+        }"#;
+        let c: AppConfig = serde_json::from_str(old).unwrap();
+        assert!(c.play_sound_on_complete);
+    }
 }

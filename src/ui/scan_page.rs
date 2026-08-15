@@ -169,16 +169,23 @@ impl ScanPage {
             }
             cb.set_sensitive(true);
 
+            // Reload the config so the latest settings (e.g. the notification
+            // sound toggle) are honoured even if changed on the Settings page.
+            *config.borrow_mut() = AppConfig::load().unwrap_or_default();
+
             let rx = sc.borrow().start_scan(target, scan_type, config.borrow().clone());
 
             // Process messages from the scanner
             glib::spawn_future_local(async move {
+                let mut total_files = 0u64;
+
                 loop {
                     // Use glib idle to check for messages
                     let _msg = glib::timeout_future(std::time::Duration::from_millis(100)).await;
 
                     match rx.try_recv() {
-                        Ok(ScanMessage::Started { target, scan_type }) => {
+                        Ok(ScanMessage::Started { target, scan_type, total_files: tf }) => {
+                            total_files = tf;
                             let type_str = match scan_type {
                                 ScanType::File => "File",
                                 ScanType::Directory => "Directory",
@@ -186,16 +193,40 @@ impl ScanPage {
                                 ScanType::FullSystem => "Full System",
                                 ScanType::Custom => "Custom",
                             };
-                            pb.set_text(Some(&format!("Scanning: {} ({})", target, type_str)));
+                            if total_files > 0 {
+                                pb.set_text(Some(&format!(
+                                    "Scanning: {} ({}) — {} files to scan",
+                                    target, type_str, total_files
+                                )));
+                            } else {
+                                pb.set_text(Some(&format!("Scanning: {} ({})", target, type_str)));
+                            }
                             cfl.set_label(&format!("Scanning: {}", target));
                         }
-                        Ok(ScanMessage::Progress { current_file, files_scanned, known_threats }) => {
+                        Ok(ScanMessage::Progress { current_file, files_scanned, known_threats, total_files: tf }) => {
+                            if tf > 0 {
+                                total_files = tf;
+                            }
                             cfl.set_label(&crate::utils::truncate_path(&current_file, 80));
-                            pb.pulse();
-                            if known_threats > 0 {
-                                pb.set_text(Some(&format!("Files scanned: {}  —  Threats found: {}", files_scanned, known_threats)));
+                            if total_files > 0 {
+                                let fraction = (files_scanned as f64 / total_files as f64).clamp(0.0, 1.0);
+                                pb.set_fraction(fraction);
+                                let pct = fraction * 100.0;
+                                let mut text = format!(
+                                    "{:.1}% — Files scanned: {} of {}",
+                                    pct, files_scanned, total_files
+                                );
+                                if known_threats > 0 {
+                                    text.push_str(&format!("  —  Threats found: {}", known_threats));
+                                }
+                                pb.set_text(Some(&text));
                             } else {
-                                pb.set_text(Some(&format!("Files scanned: {}", files_scanned)));
+                                pb.pulse();
+                                if files_scanned == 0 {
+                                    pb.set_text(Some(&current_file));
+                                } else {
+                                    pb.set_text(Some(&format!("Files scanned: {}", files_scanned)));
+                                }
                             }
                         }
                         Ok(ScanMessage::FileResult(result)) => {
@@ -263,6 +294,9 @@ impl ScanPage {
                             pb.set_fraction(1.0);
                             let infected_count = results.len();
                             pb.set_text(Some("Scan complete"));
+                            if config.borrow().play_sound_on_complete {
+                                crate::utils::play_chirp();
+                            }
 
                             if infected_count == 0 {
                                 sl.set_label(&format!(
@@ -332,8 +366,10 @@ impl ScanPage {
                         }
                         Err(crossbeam_channel::TryRecvError::Empty) => {
                             // Pulse periodically so the bar shows activity
-                            // even when clamscan output is sparse
-                            pb.pulse();
+                            // while counting or when clamscan output is sparse
+                            if total_files == 0 {
+                                pb.pulse();
+                            }
                         }
                         Err(crossbeam_channel::TryRecvError::Disconnected) => {
                             // Channel closed

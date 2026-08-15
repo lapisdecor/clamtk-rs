@@ -2,5 +2,6 @@
 <gresources>
   <gresource prefix="/com/gatochalupa/clamtk-rs">
     <file alias="icons/scalable/apps/com.gatochalupa.clamtk-rs.svg">icons/scalable/apps/com.gatochalupa.clamtk-rs.svg</file>
+    <file alias="sounds/chirp.wav">sounds/chirp.wav</file>
   </gresource>
 </gresources>

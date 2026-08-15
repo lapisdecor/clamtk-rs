@@ -1,3 +1,60 @@
+/// Play a short bird-tweet sound to notify the user that a scan has finished.
+/// The WAV is bundled in the app resources; it is extracted to the user's
+/// cache directory and played with whatever audio player is available.
+/// Does nothing (with a logged warning) if no player can be found.
+pub fn play_chirp() {
+    let data = match gio::resources_lookup_data(
+        "/com/gatochalupa/clamtk-rs/sounds/chirp.wav",
+        gio::ResourceLookupFlags::NONE,
+    ) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            log::warn!("chirp.wav resource not found: {}", e);
+            return;
+        }
+    };
+
+    let cache_dir = dirs::cache_dir().unwrap_or_else(std::env::temp_dir);
+    let sound_dir = cache_dir.join("clamtk-rs");
+    if let Err(e) = std::fs::create_dir_all(&sound_dir) {
+        log::warn!(
+            "could not create sound directory {}: {}",
+            sound_dir.display(),
+            e
+        );
+        return;
+    }
+    let wav_path = sound_dir.join("chirp.wav");
+    if let Err(e) = std::fs::write(&wav_path, data.as_ref()) {
+        log::warn!("could not write {}: {}", wav_path.display(), e);
+        return;
+    }
+    log::debug!("chirp.wav extracted to {}", wav_path.display());
+
+    // Try the available players in order of preference, both by name and by
+    // their usual absolute paths, without relying on the `which` binary.
+    let mut candidates: Vec<(&str, Vec<&str>)> = vec![
+        ("paplay", vec![]),
+        ("aplay", vec![]),
+        ("canberra-gtk-play", vec!["-f"]),
+    ];
+    candidates.push(("/usr/bin/paplay", vec![]));
+    candidates.push(("/usr/bin/aplay", vec![]));
+    candidates.push(("/usr/bin/canberra-gtk-play", vec!["-f"]));
+    candidates.push(("/bin/aplay", vec![]));
+
+    for (player, args) in candidates {
+        let mut cmd = std::process::Command::new(player);
+        cmd.args(&args).arg(&wav_path);
+        match cmd.spawn() {
+            Ok(_) => return,
+            Err(e) => log::warn!("failed to start {}: {}", player, e),
+        }
+    }
+
+    log::warn!("no audio player available to play {}", wav_path.display());
+}
+
 /// Format a file size in human-readable format
 pub fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -122,4 +179,27 @@ pub fn is_host_ubuntu() -> bool {
         }
         false
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chirp_wav_is_bundled_and_playable() {
+        gio::resources_register_include!("clamtk_rs.gresource");
+        let data = gio::resources_lookup_data(
+            "/com/gatochalupa/clamtk-rs/sounds/chirp.wav",
+            gio::ResourceLookupFlags::NONE,
+        );
+        assert!(data.is_ok(), "resource lookup failed: {:?}", data.err());
+        assert!(data.unwrap().len() > 100, "chirp.wav is too small");
+    }
+
+    #[test]
+    fn play_chirp_starts_a_player() {
+        gio::resources_register_include!("clamtk_rs.gresource");
+        // Must not panic regardless of whether an audio player is available.
+        play_chirp();
+    }
 }

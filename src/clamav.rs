@@ -83,7 +83,7 @@ fn get_command_output(cmd: &str, args: &[&str]) -> Result<String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-fn which_command(cmd: &str) -> bool {
+pub(crate) fn which_command(cmd: &str) -> bool {
     Command::new("which")
         .arg(cmd)
         .output()

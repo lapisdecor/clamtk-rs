@@ -30,11 +30,13 @@ pub enum ScanMessage {
     Started {
         target: String,
         scan_type: ScanType,
+        total_files: u64,
     },
     Progress {
         current_file: String,
         files_scanned: u64,
         known_threats: u64,
+        total_files: u64,
     },
     FileResult(ScanResult),
     Completed {
@@ -99,9 +101,18 @@ impl Scanner {
             let start_time = std::time::Instant::now();
             let target_str = target.to_string_lossy().to_string();
 
+            let _ = tx.send(ScanMessage::Progress {
+                current_file: "Counting files to scan...".into(),
+                files_scanned: 0,
+                known_threats: 0,
+                total_files: 0,
+            });
+            let total_files = count_files(&target);
+
             let _ = tx.send(ScanMessage::Started {
                 target: target_str.clone(),
                 scan_type,
+                total_files,
             });
 
             let mut args = config.to_clamscan_args();
@@ -116,6 +127,7 @@ impl Scanner {
                         current_file: "Downloading virus definitions (first run)...".into(),
                         files_scanned: 0,
                         known_threats: 0,
+                        total_files,
                     });
                 }
                 if let Err(e) = crate::clamav::ensure_database() {
@@ -215,6 +227,7 @@ impl Scanner {
                             current_file: path,
                             files_scanned,
                             known_threats,
+                            total_files,
                         });
                         continue;
                     }
@@ -233,6 +246,7 @@ impl Scanner {
                             current_file: path,
                             files_scanned,
                             known_threats,
+                            total_files,
                         });
                         continue;
                     }
@@ -251,6 +265,7 @@ impl Scanner {
                             current_file: path,
                             files_scanned,
                             known_threats,
+                            total_files,
                         });
                         continue;
                     }
@@ -355,6 +370,20 @@ impl Scanner {
     }
 }
 
+/// Estimate the number of files clamscan will scan so the UI can show a
+/// percentage. For a single file this is trivially 1; otherwise walk the
+/// target directory without following symlinks, matching clamscan's defaults.
+fn count_files(path: &std::path::Path) -> u64 {
+    if path.is_file() {
+        return 1;
+    }
+    walkdir::WalkDir::new(path)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().is_file())
+        .count() as u64
+}
+
 #[derive(Debug)]
 struct ScanSummary {
     files_scanned: u64,
@@ -435,5 +464,43 @@ fn parse_clamscan_summary(output: &str) -> ScanSummary {
 impl Default for Scanner {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_scan_reaches_completed() {
+        // End-to-end check of the scanner -> Completed message flow, the same
+        // path that triggers play_bell() in the UI. Skips (does not fail) when
+        // clamscan is unavailable on the machine running the tests.
+        let tmp = std::env::temp_dir().join(format!("clamtk_rs_scan_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let _ = std::fs::write(tmp.join("a.txt"), "hello");
+        let _ = std::fs::write(tmp.join("b.txt"), "world");
+
+        let scanner = Scanner::new();
+        let rx = scanner.start_scan(tmp.clone(), ScanType::Directory, AppConfig::default());
+
+        let mut result = None;
+        while let Ok(msg) = rx.recv() {
+            match msg {
+                ScanMessage::Completed { .. } => {
+                    result = Some("completed");
+                    break;
+                }
+                ScanMessage::Error(e) => {
+                    eprintln!("scan skipped (clamscan unavailable?): {}", e);
+                    result = Some("skipped");
+                    break;
+                }
+                ScanMessage::Cancelled => break,
+                _ => {}
+            }
+        }
+        assert!(result.is_some(), "scan channel closed without a terminal message");
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

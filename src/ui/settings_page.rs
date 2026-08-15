@@ -42,6 +42,36 @@ impl SettingsPage {
         let content = Box::new(Orientation::Vertical, 16);
         scroll.set_child(Some(&content));
 
+        // === Notifications ===
+        let notif_title = Label::builder()
+            .label("<b>Notifications</b>")
+            .use_markup(true)
+            .halign(Align::Start)
+            .build();
+        content.append(&notif_title);
+
+        let play_sound = {
+            let c = config.borrow();
+            CheckButton::builder()
+                .label("Play a sound when a scan is finished")
+                .active(c.play_sound_on_complete)
+                .build()
+        };
+        content.append(&play_sound);
+
+        // Apply this toggle immediately (no need to press Save), so disabling
+        // the sound stops it from playing on the very next scan.
+        let config_sound = config.clone();
+        play_sound.connect_toggled(move |chk| {
+            let mut cfg = config_sound.borrow_mut();
+            cfg.play_sound_on_complete = chk.is_active();
+            if let Err(e) = cfg.save() {
+                log::error!("Failed to save notification setting: {}", e);
+            }
+        });
+
+        content.append(&Separator::new(Orientation::Horizontal));
+
         // === Scan Options ===
         let scan_title = Label::builder()
             .label("<b>Scan Options</b>")
@@ -252,6 +282,7 @@ impl SettingsPage {
 
         // Wire up save button
         let config_rc = config.clone();
+        let play_sound_c = play_sound.clone();
         let scan_archives_c = scan_archives.clone();
         let scan_elf_c = scan_elf.clone();
         let scan_pdf_c = scan_pdf.clone();
@@ -269,6 +300,7 @@ impl SettingsPage {
         save_btn.connect_clicked(move |_| {
             let mut cfg = config_rc.borrow_mut();
 
+            cfg.play_sound_on_complete = play_sound_c.is_active();
             cfg.scan_archives = scan_archives_c.is_active();
             cfg.scan_elf = scan_elf_c.is_active();
             cfg.scan_pdf = scan_pdf_c.is_active();
@@ -329,6 +361,7 @@ impl SettingsPage {
 
         // Wire up reset button
         let config_rc2 = config.clone();
+        let play_sound_r = play_sound.clone();
         let scan_archives_r = scan_archives.clone();
         let scan_elf_r = scan_elf.clone();
         let scan_pdf_r = scan_pdf.clone();
@@ -354,6 +387,7 @@ impl SettingsPage {
                 .build();
 
             let cfg_rc = config_rc2.clone();
+            let ps = play_sound_r.clone();
             let sa = scan_archives_r.clone();
             let se = scan_elf_r.clone();
             let sp = scan_pdf_r.clone();
@@ -373,6 +407,7 @@ impl SettingsPage {
                     let default = AppConfig::default();
                     *cfg_rc.borrow_mut() = default.clone();
 
+                    ps.set_active(default.play_sound_on_complete);
                     sa.set_active(default.scan_archives);
                     se.set_active(default.scan_elf);
                     sp.set_active(default.scan_pdf);
