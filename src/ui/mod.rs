@@ -4,5 +4,6 @@ pub mod history_page;
 pub mod quarantine_page;
 pub mod scan_page;
 pub mod settings_page;
+pub mod snap_setup;
 pub mod update_page;
 pub mod window;

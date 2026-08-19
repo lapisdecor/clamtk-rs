@@ -209,6 +209,10 @@ impl MainWindow {
     pub fn present(&self) {
         self.window.present();
     }
+
+    pub fn window_ref(&self) -> &ApplicationWindow {
+        &self.window
+    }
 }
 
 fn build_sidebar() -> ListBox {

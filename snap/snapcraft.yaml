@@ -45,6 +45,7 @@ apps:
       - network
       - removable-media
       - audio-playback
+      - mount-observe
 
 parts:
   clamtk-rs:
