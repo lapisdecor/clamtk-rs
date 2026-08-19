@@ -20,10 +20,17 @@ pub fn quarantine_dir() -> PathBuf {
     crate::config::AppConfig::load()
         .map(|c| c.quarantine_dir)
         .unwrap_or_else(|_| {
-            dirs::data_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join("clamtk-rs")
-                .join("quarantine")
+            if crate::utils::is_running_in_snap() {
+                std::env::var_os("SNAP_USER_DATA")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| PathBuf::from("/tmp"))
+                    .join("quarantine")
+            } else {
+                dirs::data_dir()
+                    .unwrap_or_else(|| PathBuf::from("/tmp"))
+                    .join("clamtk-rs")
+                    .join("quarantine")
+            }
         })
 }
 
@@ -49,10 +56,74 @@ pub fn save_entries(entries: &[QuarantineEntry]) -> Result<()> {
     Ok(())
 }
 
+pub fn can_quarantine(file_path: &Path) -> Result<()> {
+    fs::metadata(file_path)
+        .context("Cannot read the infected file (permission denied)")?;
+
+    let parent = file_path.parent().unwrap_or(Path::new("/"));
+
+    let test_name = format!(".clamtk-rs-test-{}", std::process::id());
+    let test_path = parent.join(&test_name);
+    fs::write(&test_path, b"")
+        .with_context(|| format!("Cannot write to directory {}", parent.display()))?;
+    fs::remove_file(&test_path)
+        .with_context(|| format!("Cannot delete from directory {}", parent.display()))?;
+
+    Ok(())
+}
+
+pub fn quarantine_command(file_path: &Path) -> String {
+    let dest = quarantine_dir();
+    format!(
+        "sudo mv '{}' '{}/'",
+        file_path.display(),
+        dest.display(),
+    )
+}
+
+fn is_path_accessible_in_snap(file_path: &Path) -> bool {
+    let path_str = file_path.to_string_lossy();
+
+    if path_str.starts_with("/media/")
+        || path_str.starts_with("/mnt/")
+        || path_str.starts_with("/run/media/")
+    {
+        return true;
+    }
+
+    let real_home = crate::utils::real_home_dir();
+    if let Some(home_str) = real_home.to_str() {
+        if path_str.starts_with(home_str) {
+            if let Ok(rel) = file_path.strip_prefix(home_str) {
+                for component in rel.components() {
+                    let name = component.as_os_str().to_string_lossy();
+                    if name.starts_with('.') {
+                        return false;
+                    }
+                }
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 pub fn quarantine_file(file_path: &Path, threat_name: &str) -> Result<QuarantineEntry> {
     if !file_path.exists() {
         anyhow::bail!("File does not exist: {}", file_path.display());
     }
+
+    if crate::utils::is_running_in_snap() && !is_path_accessible_in_snap(file_path) {
+        let cmd = quarantine_command(file_path);
+        anyhow::bail!(
+            "Cannot quarantine system files from within the snap sandbox. \
+             Run this command in a terminal:\n\n{}",
+            cmd,
+        );
+    }
+
+    can_quarantine(file_path)?;
 
     let file_name = file_path
         .file_name()

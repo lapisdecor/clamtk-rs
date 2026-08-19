@@ -3,6 +3,7 @@ use gtk4::{
     Box, Button, FileChooserDialog, FileChooserAction,
     Label, Orientation, ProgressBar, PolicyType,
     ScrolledWindow, Align, ResponseType, ApplicationWindow,
+    MessageDialog, MessageType, ButtonsType, TextView, WrapMode,
 };
 
 use std::path::PathBuf;
@@ -136,6 +137,7 @@ impl ScanPage {
         let results_box_clone = results_box.clone();
         let cancel_btn_clone = cancel_btn.clone();
         let scan_btn_box_clone = scan_btn_box.clone();
+        let window_clone = window.clone();
 
         let start_scan = move |target: PathBuf, scan_type: ScanType| {
             let sc = scanner_rc.clone();
@@ -146,6 +148,7 @@ impl ScanPage {
             let rb = results_box_clone.clone();
             let cb = cancel_btn_clone.clone();
             let sbb = scan_btn_box_clone.clone();
+            let wfq = window_clone.clone();
 
             // Clear previous results
             while let Some(child) = rb.first_child() {
@@ -268,6 +271,7 @@ impl ScanPage {
                                 let path_for_q = result.path.clone();
                                 let threat_for_q = threat.clone();
                                 let sl_for_q = sl.clone();
+                                let wfq_for_q = wfq.clone();
                                 q_btn.connect_clicked(move |_| {
                                     match crate::quarantine::quarantine_file(
                                         std::path::Path::new(&path_for_q),
@@ -277,6 +281,13 @@ impl ScanPage {
                                     sl_for_q.set_label(&format!("Quarantined: {}", path_for_q));
                                         }
                                         Err(e) => {
+                                            if crate::utils::is_running_in_snap() {
+                                                show_snap_quarantine_dialog(
+                                                    &wfq_for_q,
+                                                    &path_for_q,
+                                                    &e.to_string(),
+                                                );
+                                            }
                                     sl_for_q.set_label(&format!("Quarantine failed: {}", e));
                                         }
                                     }
@@ -479,4 +490,45 @@ impl ScanPage {
             f(crate::utils::real_home_dir(), ScanType::Home);
         }
     }
+}
+
+fn show_snap_quarantine_dialog(parent: &ApplicationWindow, file_path: &str, error: &str) {
+    let dialog = MessageDialog::builder()
+        .text("Quarantine requires elevated privileges")
+        .secondary_text(format!(
+            "The snap sandbox cannot move this file.\n\nError: {}\n\n\
+             Run the following command in a terminal:",
+            error,
+        ))
+        .message_type(MessageType::Warning)
+        .buttons(ButtonsType::Close)
+        .transient_for(parent)
+        .build();
+
+    let content_area = dialog.content_area();
+
+    let cmd = crate::quarantine::quarantine_command(std::path::Path::new(file_path));
+    let cmd_view = TextView::builder()
+        .editable(false)
+        .wrap_mode(WrapMode::WordChar)
+        .monospace(true)
+        .top_margin(8)
+        .build();
+    cmd_view.buffer().set_text(&cmd);
+    content_area.append(&cmd_view);
+
+    let copy_btn = Button::builder()
+        .label("Copy to Clipboard")
+        .build();
+    let cmd_clone = cmd.clone();
+    copy_btn.connect_clicked(move |btn| {
+        btn.clipboard().set_text(&cmd_clone);
+    });
+    content_area.append(&copy_btn);
+
+    dialog.connect_response(|dlg, _| {
+        dlg.close();
+    });
+
+    dialog.show();
 }

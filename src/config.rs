@@ -28,10 +28,17 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        let quarantine_dir = dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("clamtk-rs")
-            .join("quarantine");
+        let quarantine_dir = if crate::utils::is_running_in_snap() {
+            std::env::var_os("SNAP_USER_DATA")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join("quarantine")
+        } else {
+            dirs::data_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join("clamtk-rs")
+                .join("quarantine")
+        };
 
         Self {
             play_sound_on_complete: true,
@@ -165,7 +172,9 @@ pub fn ensure_dirs() -> Result<()> {
     let data_dir = AppConfig::data_dir();
     fs::create_dir_all(&data_dir)?;
 
-    let quarantine_dir = AppConfig::default().quarantine_dir;
+    let quarantine_dir = AppConfig::load()
+        .map(|c| c.quarantine_dir)
+        .unwrap_or_default();
     fs::create_dir_all(&quarantine_dir)?;
 
     Ok(())
