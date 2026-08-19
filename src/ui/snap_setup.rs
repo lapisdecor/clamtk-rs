@@ -24,7 +24,7 @@ pub fn show_if_needed(parent: &ApplicationWindow) {
     show(parent);
 }
 
-fn show(parent: &ApplicationWindow) {
+fn show(_parent: &ApplicationWindow) {
     let dialog = MessageDialog::builder()
         .text("ClamTK-rs Snap Setup")
         .secondary_text(
@@ -33,10 +33,10 @@ fn show(parent: &ApplicationWindow) {
         )
         .message_type(MessageType::Info)
         .buttons(ButtonsType::Close)
-        .transient_for(parent)
         .build();
 
     let content_area = dialog.content_area();
+    content_area.set_size_request(450, -1);
 
     let cmd1 = "sudo snap connect clamtk-rs:removable-media";
     let cmd2 = "sudo snap connect clamtk-rs:mount-observe";

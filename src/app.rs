@@ -36,7 +36,10 @@ impl App {
 
         self.gtk_app.connect_activate(|gtk_app| {
             let main_window = MainWindow::new(gtk_app);
-            crate::ui::snap_setup::show_if_needed(main_window.window_ref());
+            let win_ref = main_window.window_ref().clone();
+            main_window.window_ref().connect_map(move |_| {
+                crate::ui::snap_setup::show_if_needed(&win_ref);
+            });
             main_window.present();
         });
 
