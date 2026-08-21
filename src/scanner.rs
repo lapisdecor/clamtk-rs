@@ -43,6 +43,8 @@ pub enum ScanMessage {
         files_scanned: u64,
         time_elapsed: f64,
         results: Vec<ScanResult>,
+        /// Non-fatal issue detected while scanning (e.g. unreadable files).
+        warning: Option<String>,
     },
     Error(String),
     Cancelled,
@@ -170,6 +172,19 @@ impl Scanner {
             };
 
             let stdout = child.stdout.take().expect("stdout should be piped");
+            let stderr = child.stderr.take().expect("stderr should be piped");
+
+            // Drain stderr on its own thread so the pipe never fills up and
+            // blocks clamscan; the collected text is used for diagnostics.
+            let stderr_thread = thread::spawn(move || {
+                let mut collected = String::new();
+                let reader = std::io::BufReader::new(stderr);
+                for line in reader.lines().map_while(Result::ok) {
+                    collected.push_str(&line);
+                    collected.push('\n');
+                }
+                collected
+            });
 
             // Store child so cancel() can kill it
             if let Ok(mut proc_guard) = process_arc.lock() {
@@ -299,6 +314,12 @@ impl Scanner {
                 *proc_guard = None;
             }
 
+            // Collect what clamscan wrote to stderr (diagnostics only)
+            let stderr_output = stderr_thread.join().unwrap_or_default();
+            if !stderr_output.trim().is_empty() {
+                log::debug!("clamscan stderr: {}", stderr_output.trim());
+            }
+
             let elapsed = start_time.elapsed().as_secs_f64();
 
             let cancelled = cancel_flag.lock().map(|f| *f).unwrap_or(false);
@@ -307,17 +328,55 @@ impl Scanner {
                 return;
             }
 
-            // Check exit code
+            // Parse summary from collected lines
+            let full_output = all_lines.join("\n");
+            let summary = parse_clamscan_summary(&full_output);
+            if summary.files_scanned > 0 {
+                files_scanned = summary.files_scanned;
+            }
+
+            // Check exit code. clamscan exits with 2 when *anything* went
+            // wrong, including single files it could not open ("Access
+            // denied" / "Can't open directory"), even though the rest of the
+            // scan completed fine. Under snap confinement that is expected:
+            // the home interface does not expose hidden files and system
+            // paths are blocked entirely, so a scan that processed at least
+            // some files still counts as finished.
+            let mut warning: Option<String> = None;
             match output_status {
-                Ok(status) => {
-                    let exit_code = status.code().unwrap_or(-1);
-                    if exit_code == 2 {
-                        let _ = tx.send(ScanMessage::Error(
-                            "clamscan failed (exit code 2)".into(),
-                        ));
+                Ok(status) => match status.code() {
+                    Some(0) | Some(1) => {}
+                    Some(2) => {
+                        if files_scanned == 0 && results.is_empty() {
+                            // Nothing was scanned at all: a real failure
+                            // (e.g. unreadable database or target).
+                            let reason = stderr_output
+                                .lines()
+                                .rev()
+                                .find(|l| !l.trim().is_empty())
+                                .unwrap_or("unknown error");
+                            let _ = tx.send(ScanMessage::Error(format!(
+                                "clamscan failed (exit code 2): {}",
+                                reason
+                            )));
+                            return;
+                        }
+                        warning = Some(if crate::utils::is_running_in_snap() {
+                            "some files were skipped because the snap sandbox cannot read hidden or system files".into()
+                        } else {
+                            "some files could not be read and were skipped".into()
+                        });
+                    }
+                    other => {
+                        let _ = tx.send(ScanMessage::Error(format!(
+                            "clamscan exited unexpectedly ({})",
+                            other
+                                .map(|c| c.to_string())
+                                .unwrap_or_else(|| "killed by signal".into())
+                        )));
                         return;
                     }
-                }
+                },
                 Err(e) => {
                     let _ = tx.send(ScanMessage::Error(format!(
                         "Scan failed: {}",
@@ -325,13 +384,6 @@ impl Scanner {
                     )));
                     return;
                 }
-            }
-
-            // Parse summary from collected lines
-            let full_output = all_lines.join("\n");
-            let summary = parse_clamscan_summary(&full_output);
-            if summary.files_scanned > 0 {
-                files_scanned = summary.files_scanned;
             }
 
             let infected_results: Vec<ScanResult> = results
@@ -344,6 +396,7 @@ impl Scanner {
                 files_scanned,
                 time_elapsed: elapsed,
                 results: infected_results.clone(),
+                warning,
             });
 
             // Save to history

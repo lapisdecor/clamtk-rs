@@ -301,6 +301,7 @@ impl ScanPage {
                             files_scanned,
                             time_elapsed,
                             results,
+                            warning,
                         }) => {
                             pb.set_fraction(1.0);
                             let infected_count = results.len();
@@ -309,20 +310,25 @@ impl ScanPage {
                                 crate::utils::play_chirp();
                             }
 
+                            let note = warning
+                                .map(|w| format!(" — Note: {}", w))
+                                .unwrap_or_default();
                             if infected_count == 0 {
                                 sl.set_label(&format!(
-                                    "✅ Scan complete — No threats found. {} files scanned in {}.",
+                                    "✅ Scan complete — No threats found. {} files scanned in {}.{}",
                                     files_scanned,
-                                    crate::utils::format_duration(time_elapsed)
+                                    crate::utils::format_duration(time_elapsed),
+                                    note
                                 ));
                                 sl.remove_css_class("status-bad");
                                 sl.add_css_class("status-good");
                             } else {
                                 sl.set_label(&format!(
-                                    "⚠️ Scan complete — {} threat(s) found! {} files scanned in {}.",
+                                    "⚠️ Scan complete — {} threat(s) found! {} files scanned in {}.{}",
                                     infected_count,
                                     files_scanned,
-                                    crate::utils::format_duration(time_elapsed)
+                                    crate::utils::format_duration(time_elapsed),
+                                    note
                                 ));
                                 sl.remove_css_class("status-good");
                                 sl.add_css_class("status-bad");
