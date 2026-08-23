@@ -38,5 +38,5 @@ snapcraft pack
 sudo snap install --dangerous clamtk-rs_1.0.0_amd64.snap
 
 # Is there a snap in the Ubuntu store?
-Not yet. I hope it will be there soon.  
+[![Get it from the Snap Store](https://snapcraft.io/en/dark/install.svg)](https://snapcraft.io/clamtk-rs)
  
