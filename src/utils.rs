@@ -129,14 +129,32 @@ pub fn snap_common_dir() -> Option<std::path::PathBuf> {
         .or_else(|| std::env::var_os("SNAP_USER_DATA").map(std::path::PathBuf::from))
 }
 
-/// True when `path` sits under a `~/snap/<name>/<revision>/...` directory and is
-/// not under `common` — i.e. it is a revision-scoped path that snapd copied
-/// forward from a previous revision and that can no longer be written to.
+/// This snap's instance name, i.e. `$SNAP_NAME`.
+fn snap_instance_name() -> Option<String> {
+    std::env::var("SNAP_NAME")
+        .ok()
+        .filter(|name| !name.is_empty())
+}
+
+/// True when `path` sits under a `~/snap/<name>/<revision>/...` directory of this
+/// snap and is not under `common` — i.e. it is a revision-scoped path that snapd
+/// copied forward from a previous revision and that can no longer be written to.
 ///
 /// This is the shape of the `quarantine_dir` that older versions persisted,
 /// which is what made startup fail with `Permission denied (os error 13)`
-/// after a refresh. Anything else (a user-chosen location) is left alone.
+/// after a refresh. Anything else — including a location the user chose
+/// themselves, or a revision directory of a *different* snap — is left alone.
 pub fn is_stale_snap_path(path: &std::path::Path, common: &std::path::Path) -> bool {
+    is_revision_scoped(path, common, snap_instance_name().as_deref())
+}
+
+/// The pure form of [`is_stale_snap_path`]. `instance` is this snap's name, or
+/// `None` when it is unknown.
+fn is_revision_scoped(
+    path: &std::path::Path,
+    common: &std::path::Path,
+    instance: Option<&str>,
+) -> bool {
     if path.starts_with(common) {
         return false;
     }
@@ -145,17 +163,47 @@ pub fn is_stale_snap_path(path: &std::path::Path, common: &std::path::Path) -> b
         if component.as_os_str() != "snap" {
             continue;
         }
-        // ~/snap/<instance>/<revision>/... — the instance name is anything, the
-        // revision is a number.
-        let _instance = components.next();
-        return components.next().is_some_and(|revision| {
+        // ~/snap/<instance>/<revision>/... — the instance name is anything and
+        // the revision is a number. When the name is known it has to match, so
+        // that an unrelated `.../snap/<something>/<number>/...` path of the
+        // user's is never mistaken for ours.
+        let found_instance = components.next();
+        let matches_instance = match (instance, &found_instance) {
+            (Some(expected), Some(found)) => found.as_os_str() == expected,
+            (Some(_), None) => false,
+            // Without a name to compare against, accept any instance.
+            (None, _) => true,
+        };
+        let is_revision = components.next().is_some_and(|revision| {
             revision
                 .as_os_str()
                 .to_str()
                 .is_some_and(|r| !r.is_empty() && r.chars().all(|ch| ch.is_ascii_digit()))
         });
+        return matches_instance && is_revision;
     }
     false
+}
+
+/// Directory holding the app's own configuration.
+///
+/// Under a snap this is a dedicated folder in `$SNAP_USER_COMMON` rather than
+/// the XDG config directory: the GNOME platform snap points `XDG_CONFIG_HOME`
+/// at the revision directory on purpose and fills it with fontconfig, ibus and
+/// `user-dirs.dirs` data, which must not be redirected.
+pub fn config_root() -> std::path::PathBuf {
+    match snap_common_dir() {
+        Some(common) => common.join("config"),
+        None => dirs::config_dir().unwrap_or_else(std::env::temp_dir),
+    }
+}
+
+/// Directory holding the app's own data (scan history), see [`config_root`].
+pub fn data_root() -> std::path::PathBuf {
+    match snap_common_dir() {
+        Some(common) => common.join("data"),
+        None => dirs::data_dir().unwrap_or_else(std::env::temp_dir),
+    }
 }
 
 /// Move one legacy revision-scoped file into its `$SNAP_USER_COMMON`
@@ -208,48 +256,36 @@ fn adopt_legacy_dir(legacy: &std::path::Path, target: &std::path::Path) {
     log::info!("migrated {} -> {}", legacy.display(), target.display());
 }
 
-/// Point the XDG base directories at `$SNAP_USER_COMMON` when running as a snap.
+/// Carry state out of the revision directory and into `$SNAP_USER_COMMON`, so
+/// that a `snap refresh` neither loses it nor re-downloads it.
 ///
-/// Without this, `dirs::config_dir()`/`data_dir()`/`cache_dir()` resolve against
-/// `$HOME`, which snapd sets to the revision directory, so settings, history and
-/// cached data would be tied to a single revision. Must be called before the
-/// first `dirs::*` use.
-pub fn init_persistent_dirs() {
+/// Only touches this app's own directories, and only when they exist: nothing
+/// here is allowed to fail, since it runs before the UI exists.
+pub fn adopt_legacy_revision_data() {
     if !is_running_in_snap() {
         return;
     }
-    let Some(common) = snap_common_dir() else {
+    let (Some(common), Some(user_data)) = (
+        snap_common_dir(),
+        std::env::var_os("SNAP_USER_DATA").map(std::path::PathBuf::from),
+    ) else {
         return;
     };
 
-    // Carry the per-revision data forward once, so settings, scan history and
-    // the downloaded virus signatures survive the move to the common directory.
-    if let Some(user_data) = std::env::var_os("SNAP_USER_DATA") {
-        let legacy = std::path::PathBuf::from(user_data);
-        for (sub, file) in [(".config", "config.json"), (".local/share", "history.json")] {
-            adopt_legacy_file(
-                &legacy.join(sub).join("clamtk-rs").join(file),
-                &common.join(sub).join("clamtk-rs").join(file),
-            );
-        }
-        adopt_legacy_dir(&legacy.join("clamav"), &common.join("clamav"));
-        // The generated config is rewritten on every run, so it needs no move.
-        let _ = std::fs::remove_file(legacy.join("freshclam.conf"));
-    }
-
-    for (var, sub) in [
-        ("XDG_CONFIG_HOME", ".config"),
-        ("XDG_DATA_HOME", ".local/share"),
-        ("XDG_CACHE_HOME", ".cache"),
-    ] {
-        let current = std::env::var_os(var);
-        let already_revision_independent = current
-            .as_deref()
-            .is_some_and(|v| std::path::Path::new(v).starts_with(&common));
-        if !already_revision_independent {
-            std::env::set_var(var, common.join(sub));
-        }
-    }
+    // Settings and history, written by older builds through `dirs`.
+    adopt_legacy_file(
+        &user_data.join(".config/clamtk-rs/config.json"),
+        &config_root().join("clamtk-rs/config.json"),
+    );
+    adopt_legacy_file(
+        &user_data.join(".local/share/clamtk-rs/history.json"),
+        &data_root().join("clamtk-rs/history.json"),
+    );
+    // The signature database, ~100 MB worth.
+    adopt_legacy_dir(&user_data.join("clamav"), &common.join("clamav"));
+    // The generated freshclam.conf is rewritten on every run, so it needs no
+    // move; drop the stale copy so nothing reads the old revision from it.
+    let _ = std::fs::remove_file(user_data.join("freshclam.conf"));
 }
 
 /// The real home directory of the invoking user. Inside a snap, `$HOME` is
@@ -337,6 +373,15 @@ pub(crate) mod testutil {
         ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Pretend to run as a snap whose `$SNAP_USER_COMMON` is `common_dir`, with
+    /// nothing left in the revision directory.
+    pub(crate) fn set_snap_env(common_dir: &Path) {
+        std::env::set_var("SNAP", "/snap/clamtk-rs/44");
+        std::env::set_var("SNAP_NAME", "clamtk-rs");
+        std::env::set_var("SNAP_USER_COMMON", common_dir);
+        std::env::remove_var("SNAP_USER_DATA");
+    }
+
     /// A fresh, empty scratch directory unique to the calling test.
     pub(crate) fn temp_dir(name: &str) -> PathBuf {
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -370,50 +415,104 @@ pub(crate) mod testutil {
 
 #[cfg(test)]
 mod tests {
+    use super::testutil;
     use super::*;
 
     #[test]
     fn revision_scoped_paths_are_stale() {
         let common = std::path::Path::new("/home/u/snap/clamtk-rs/common");
-        assert!(is_stale_snap_path(
+        assert!(is_revision_scoped(
             std::path::Path::new("/home/u/snap/clamtk-rs/39/quarantine"),
-            common
+            common,
+            Some("clamtk-rs")
         ));
-        assert!(is_stale_snap_path(
+        assert!(is_revision_scoped(
             std::path::Path::new("/home/u/snap/clamtk-rs/39"),
-            common
+            common,
+            Some("clamtk-rs")
         ));
-        assert!(is_stale_snap_path(
+        assert!(is_revision_scoped(
             std::path::Path::new("/home/u/snap/clamtk-rs/1007/clamav"),
-            common
+            common,
+            Some("clamtk-rs")
+        ));
+        // Without a known instance name any instance still counts, so the
+        // original crash cannot come back.
+        assert!(is_revision_scoped(
+            std::path::Path::new("/home/u/snap/clamtk-rs/39/quarantine"),
+            common,
+            None
         ));
     }
 
     #[test]
     fn common_and_user_chosen_paths_are_not_stale() {
         let common = std::path::Path::new("/home/u/snap/clamtk-rs/common");
-        assert!(!is_stale_snap_path(
+        let name = Some("clamtk-rs");
+        assert!(!is_revision_scoped(
             std::path::Path::new("/home/u/snap/clamtk-rs/common/quarantine"),
-            common
+            common,
+            name
         ));
-        assert!(!is_stale_snap_path(
+        assert!(!is_revision_scoped(
             std::path::Path::new("/srv/clamtk-quarantine"),
-            common
+            common,
+            name
         ));
-        assert!(!is_stale_snap_path(
+        assert!(!is_revision_scoped(
             std::path::Path::new("/home/u/.local/share/clamtk-rs/quarantine"),
-            common
+            common,
+            name
         ));
         // A directory that merely starts with "snap" is unrelated.
-        assert!(!is_stale_snap_path(
+        assert!(!is_revision_scoped(
             std::path::Path::new("/home/u/snapshots/clamtk/quarantine"),
-            common
+            common,
+            name
         ));
         // Another snap's common directory is not ours to rewrite.
-        assert!(!is_stale_snap_path(
+        assert!(!is_revision_scoped(
             std::path::Path::new("/home/u/snap/other-snap/common/quarantine"),
-            common
+            common,
+            name
         ));
+        // A path of the user's own that happens to look revision-scoped must be
+        // left alone rather than hijacked into the common directory.
+        assert!(!is_revision_scoped(
+            std::path::Path::new("/media/snap/backup/2024/quarantine"),
+            common,
+            name
+        ));
+        assert!(!is_revision_scoped(
+            std::path::Path::new("/home/u/snap/other-snap/39/quarantine"),
+            common,
+            name
+        ));
+    }
+
+    #[test]
+    fn app_directories_avoid_the_platform_xdg_dirs() {
+        let _guard = testutil::env_lock();
+        let root = testutil::temp_dir("roots");
+        let common = root.join("snap/clamtk-rs/common");
+        let user_data = root.join("snap/clamtk-rs/44");
+        testutil::set_snap_env(&common);
+        std::env::set_var("SNAP_USER_DATA", &user_data);
+
+        // The GNOME platform snap populates `$SNAP_USER_DATA/.config` with
+        // fontconfig and ibus data, so the app uses its own subdirectory of
+        // the common directory instead of the XDG ones.
+        assert_eq!(config_root(), common.join("config"));
+        assert_eq!(data_root(), common.join("data"));
+        for dir in [config_root(), data_root(), snap_database_dir().unwrap()] {
+            assert!(
+                !dir.starts_with(&user_data),
+                "{} must not live in the revision directory",
+                dir.display()
+            );
+        }
+
+        testutil::cleanup(&root);
     }
 
     #[test]

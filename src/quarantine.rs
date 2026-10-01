@@ -109,14 +109,19 @@ pub fn migrate_quarantine_dir(from: &Path, to: &Path) {
 
 /// Adopt a quarantine directory left in `$SNAP_USER_DATA` by a previous revision
 /// of this snap, for the case where the configuration itself was not stale.
-pub fn adopt_legacy_quarantine() {
+///
+/// `effective_dir` is the directory the app is about to use. Anything left in
+/// the revision directory is only adopted when that is the default location,
+/// since moving files to a directory the app is not configured to read would
+/// simply hide them.
+pub fn adopt_legacy_quarantine(effective_dir: &Path) {
+    if effective_dir != default_quarantine_dir() {
+        return;
+    }
     let Some(user_data) = std::env::var_os("SNAP_USER_DATA") else {
         return;
     };
-    migrate_quarantine_dir(
-        &PathBuf::from(user_data).join("quarantine"),
-        &default_quarantine_dir(),
-    );
+    migrate_quarantine_dir(&PathBuf::from(user_data).join("quarantine"), effective_dir);
 }
 
 fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {

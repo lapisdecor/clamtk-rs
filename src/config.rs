@@ -51,11 +51,7 @@ impl Default for AppConfig {
             detect_pua: false,
             heuristic_scan: true,
             scan_follow_symlinks: false,
-            exclude_paths: vec![
-                "/proc".into(),
-                "/sys".into(),
-                "/dev".into(),
-            ],
+            exclude_paths: vec!["/proc".into(), "/sys".into(), "/dev".into()],
             max_file_size_mb: 25,
             max_scan_time_sec: 600,
             quarantine_dir,
@@ -66,9 +62,7 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn config_dir() -> PathBuf {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("clamtk-rs")
+        crate::utils::config_root().join("clamtk-rs")
     }
 
     pub fn config_file() -> PathBuf {
@@ -76,9 +70,7 @@ impl AppConfig {
     }
 
     pub fn data_dir() -> PathBuf {
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-            .join("clamtk-rs")
+        crate::utils::data_root().join("clamtk-rs")
     }
 
     pub fn history_file() -> PathBuf {
@@ -260,7 +252,7 @@ pub fn ensure_dirs() -> Vec<String> {
         ));
     }
 
-    crate::quarantine::adopt_legacy_quarantine();
+    crate::quarantine::adopt_legacy_quarantine(&quarantine_dir);
 
     warnings
 }
@@ -269,16 +261,6 @@ pub fn ensure_dirs() -> Vec<String> {
 mod tests {
     use super::*;
     use crate::utils::testutil;
-
-    /// Pretend to run as a snap whose `$SNAP_USER_COMMON` is `common_dir`,
-    /// with settings stored under it.
-    fn set_up_snap_env(common_dir: &std::path::Path) {
-        std::env::set_var("SNAP", "/snap/clamtk-rs/44");
-        std::env::set_var("SNAP_USER_COMMON", common_dir);
-        std::env::remove_var("SNAP_USER_DATA");
-        std::env::set_var("XDG_CONFIG_HOME", common_dir.join(".config"));
-        std::env::set_var("XDG_DATA_HOME", common_dir.join(".local/share"));
-    }
 
     #[test]
     fn roundtrip_play_sound() {
@@ -324,7 +306,7 @@ mod tests {
         let _guard = testutil::env_lock();
         let root = testutil::temp_dir("cfg_stale");
         let common = root.join("common");
-        set_up_snap_env(&common);
+        testutil::set_snap_env(&common);
 
         let config = AppConfig {
             quarantine_dir: root.join("snap/clamtk-rs/39/quarantine"),
@@ -360,7 +342,7 @@ mod tests {
         let _guard = testutil::env_lock();
         let root = testutil::temp_dir("cfg_custom");
         let common = root.join("common");
-        set_up_snap_env(&common);
+        testutil::set_snap_env(&common);
 
         let custom = root.join("my-quarantine");
         let config = AppConfig {
@@ -378,6 +360,46 @@ mod tests {
         testutil::cleanup(&root);
     }
 
+    /// Leftovers in the revision directory must not be moved into the common
+    /// directory when the user keeps a custom quarantine location: the app
+    /// reads the custom directory, so anything moved elsewhere would silently
+    /// disappear from the quarantine list.
+    #[test]
+    fn legacy_quarantine_is_not_adopted_for_custom_dir() {
+        let _guard = testutil::env_lock();
+        let root = testutil::temp_dir("cfg_custom_adopt");
+        let common = root.join("common");
+        let new_rev = root.join("snap/clamtk-rs/44");
+        testutil::set_snap_env(&common);
+        std::env::set_var("SNAP_USER_DATA", &new_rev);
+
+        let custom = root.join("my-quarantine");
+        let config = AppConfig {
+            quarantine_dir: custom.clone(),
+            ..Default::default()
+        };
+        let path = AppConfig::config_file();
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+        // Files the older build left behind in the revision directory.
+        let legacy = new_rev.join("quarantine");
+        fs::create_dir_all(&legacy).unwrap();
+        fs::write(legacy.join("metadata.json"), "[]").unwrap();
+        fs::write(legacy.join("eicar.pdf"), "infected").unwrap();
+
+        assert!(ensure_dirs().is_empty());
+
+        assert!(
+            legacy.join("eicar.pdf").is_file(),
+            "legacy files must not be moved away from a custom configuration"
+        );
+        assert!(!common.join("quarantine").exists());
+        assert!(custom.is_dir());
+
+        testutil::cleanup(&root);
+    }
+
     /// An unwritable directory must be reported to the user, never fatal.
     #[test]
     fn unwritable_quarantine_dir_warns_instead_of_failing() {
@@ -385,7 +407,7 @@ mod tests {
         let _guard = testutil::env_lock();
         let root = testutil::temp_dir("cfg_nowrite");
         let common = root.join("common");
-        set_up_snap_env(&common);
+        testutil::set_snap_env(&common);
 
         let read_only = root.join("read-only");
         fs::create_dir_all(&read_only).unwrap();
@@ -421,7 +443,7 @@ mod tests {
     fn snap_defaults_keep_state_in_common_dir() {
         let _guard = testutil::env_lock();
         let root = testutil::temp_dir("cfg_default");
-        set_up_snap_env(&root.join("common"));
+        testutil::set_snap_env(&root.join("common"));
 
         let config = AppConfig::default();
         assert_eq!(config.quarantine_dir, root.join("common/quarantine"));
@@ -474,32 +496,45 @@ mod tests {
         fs::write(quarantined.join("eicar.pdf"), "infected").unwrap();
 
         std::env::set_var("SNAP", root.join("snap/clamtk-rs/43"));
+        std::env::set_var("SNAP_NAME", "clamtk-rs");
         std::env::set_var("SNAP_USER_DATA", &new_rev);
         std::env::set_var("SNAP_USER_COMMON", &common);
-        for var in ["XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME"] {
-            std::env::remove_var(var);
-        }
+        // As the GNOME platform launcher sets them, so we can prove we leave
+        // them alone.
+        std::env::set_var("XDG_CONFIG_HOME", new_rev.join(".config"));
+        std::env::set_var("XDG_DATA_HOME", new_rev.join(".local/share"));
 
-        crate::utils::init_persistent_dirs();
+        crate::utils::adopt_legacy_revision_data();
 
         // Settings, history and signatures are now revision-independent.
         assert_eq!(
             AppConfig::config_file(),
-            common.join(".config/clamtk-rs/config.json")
+            common.join("config/clamtk-rs/config.json")
         );
-        assert!(common.join(".local/share/clamtk-rs/history.json").is_file());
+        assert!(common.join("data/clamtk-rs/history.json").is_file());
         assert_eq!(
             std::fs::read_to_string(common.join("clamav/daily.cvd")).unwrap(),
             "signatures",
             "signatures should move, not be re-downloaded"
         );
         assert_eq!(
-            std::env::var("XDG_CONFIG_HOME").unwrap(),
-            common.join(".config").to_str().unwrap()
-        );
-        assert_eq!(
             crate::utils::snap_database_dir().unwrap(),
             common.join("clamav")
+        );
+        // The GNOME platform owns the XDG directories: it keeps its
+        // fontconfig, ibus and theme data there, so they must not be
+        // redirected into the common directory.
+        assert_eq!(
+            std::env::var("XDG_CONFIG_HOME").unwrap(),
+            new_rev.join(".config").to_str().unwrap()
+        );
+        assert_eq!(
+            std::env::var("XDG_DATA_HOME").unwrap(),
+            new_rev.join(".local/share").to_str().unwrap()
+        );
+        assert!(
+            !common.join(".config").exists(),
+            "the app must not take over the platform's XDG config directory"
         );
 
         // Startup succeeds and repairs the dangling quarantine path.
