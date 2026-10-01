@@ -1,15 +1,15 @@
 use gtk4::prelude::*;
 use gtk4::{
-    ApplicationWindow, Button, Label,
-    MessageDialog, MessageType, ButtonsType, TextView, WrapMode,
+    ApplicationWindow, Button, ButtonsType, Label, MessageDialog, MessageType, TextView, WrapMode,
 };
 
 use std::path::PathBuf;
 
 fn sentinel_file() -> PathBuf {
-    std::env::var_os("SNAP_USER_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| std::env::temp_dir())
+    // `$SNAP_USER_COMMON`, so the setup dialog is not shown again after every
+    // snap refresh.
+    crate::utils::snap_common_dir()
+        .unwrap_or_else(std::env::temp_dir)
         .join(".snap-setup-done")
 }
 

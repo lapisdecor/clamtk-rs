@@ -7,7 +7,7 @@ platforms:
   arm64:
     build-on: [arm64]
     build-for: [arm64]
-version: '1.0.0'
+version: '1.0.1'
 summary: A GTK4 graphical frontend for ClamAV
 title: ClamTK-rs
 contact: lapisdecor@gmail.com

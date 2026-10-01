@@ -19,19 +19,118 @@ pub struct QuarantineEntry {
 pub fn quarantine_dir() -> PathBuf {
     crate::config::AppConfig::load()
         .map(|c| c.quarantine_dir)
-        .unwrap_or_else(|_| {
-            if crate::utils::is_running_in_snap() {
-                std::env::var_os("SNAP_USER_DATA")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| PathBuf::from("/tmp"))
-                    .join("quarantine")
-            } else {
-                dirs::data_dir()
-                    .unwrap_or_else(|| PathBuf::from("/tmp"))
-                    .join("clamtk-rs")
-                    .join("quarantine")
+        .unwrap_or_else(|_| default_quarantine_dir())
+}
+
+fn default_quarantine_dir() -> PathBuf {
+    if crate::utils::is_running_in_snap() {
+        crate::utils::snap_common_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("quarantine")
+    } else {
+        dirs::data_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("clamtk-rs")
+            .join("quarantine")
+    }
+}
+
+/// Move an existing quarantine directory from `from` to `to`, rewriting the
+/// stored locations so restore/delete/purge keep working.
+///
+/// Older versions stored `$SNAP_USER_DATA/quarantine`, so after a refresh the
+/// files are still in the previous revision's directory (or, if snapd already
+/// pruned it, gone) while the app now looks in `$SNAP_USER_COMMON/quarantine`.
+/// Best effort and never fatal: anything that cannot be recovered is left where
+/// it is for the user to inspect.
+pub fn migrate_quarantine_dir(from: &Path, to: &Path) {
+    if from == to || !from.join("metadata.json").exists() {
+        return;
+    }
+    if to.join("metadata.json").exists() {
+        return;
+    }
+
+    let moved = match fs::rename(from, to) {
+        Ok(()) => true,
+        Err(e) => {
+            log::warn!("could not move {}: {}", from.display(), e);
+            // Rename can fail across filesystems; copy the files instead.
+            match copy_dir_all(from, to) {
+                Ok(()) => {
+                    let _ = fs::remove_dir_all(from);
+                    true
+                }
+                Err(e) => {
+                    log::warn!("could not copy {}: {}", from.display(), e);
+                    false
+                }
             }
+        }
+    };
+    if !moved {
+        return;
+    }
+    log::info!(
+        "quarantine migrated from {} to {}",
+        from.display(),
+        to.display()
+    );
+
+    // Entries hold absolute paths into the old directory; repoint them. Reading
+    // and writing through explicit paths keeps this independent of the
+    // configuration, which the caller may be in the middle of repairing.
+    let metadata = to.join("metadata.json");
+    let entries = match read_entries(&metadata) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!("could not re-read quarantine metadata: {}", e);
+            return;
+        }
+    };
+    let updated: Vec<QuarantineEntry> = entries
+        .into_iter()
+        .map(|mut entry| {
+            if entry.quarantine_path.starts_with(from) {
+                let name = entry
+                    .quarantine_path
+                    .file_name()
+                    .map(PathBuf::from)
+                    .unwrap_or_default();
+                entry.quarantine_path = to.join(name);
+            }
+            entry
         })
+        .collect();
+    if let Err(e) = write_entries(&metadata, &updated) {
+        log::warn!("could not update quarantine metadata: {}", e);
+    }
+}
+
+/// Adopt a quarantine directory left in `$SNAP_USER_DATA` by a previous revision
+/// of this snap, for the case where the configuration itself was not stale.
+pub fn adopt_legacy_quarantine() {
+    let Some(user_data) = std::env::var_os("SNAP_USER_DATA") else {
+        return;
+    };
+    migrate_quarantine_dir(
+        &PathBuf::from(user_data).join("quarantine"),
+        &default_quarantine_dir(),
+    );
+}
+
+fn copy_dir_all(from: &Path, to: &Path) -> Result<()> {
+    fs::create_dir_all(to)?;
+    for entry in fs::read_dir(from)? {
+        let entry = entry?;
+        let dest = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&entry.path(), &dest)?;
+        } else {
+            fs::copy(entry.path(), &dest)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn metadata_file() -> PathBuf {
@@ -39,26 +138,34 @@ pub fn metadata_file() -> PathBuf {
 }
 
 pub fn load_entries() -> Result<Vec<QuarantineEntry>> {
+    read_entries(&metadata_file())
+}
+
+pub fn save_entries(entries: &[QuarantineEntry]) -> Result<()> {
     let path = metadata_file();
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    write_entries(&path, entries)
+}
+
+fn read_entries(path: &Path) -> Result<Vec<QuarantineEntry>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let data = fs::read_to_string(&path)?;
+    let data = fs::read_to_string(path)?;
     let entries: Vec<QuarantineEntry> = serde_json::from_str(&data)?;
     Ok(entries)
 }
 
-pub fn save_entries(entries: &[QuarantineEntry]) -> Result<()> {
-    let dir = quarantine_dir();
-    fs::create_dir_all(&dir)?;
+fn write_entries(path: &Path, entries: &[QuarantineEntry]) -> Result<()> {
     let data = serde_json::to_string_pretty(entries)?;
-    fs::write(metadata_file(), data)?;
+    fs::write(path, data)?;
     Ok(())
 }
 
 pub fn can_quarantine(file_path: &Path) -> Result<()> {
-    fs::metadata(file_path)
-        .context("Cannot read the infected file (permission denied)")?;
+    fs::metadata(file_path).context("Cannot read the infected file (permission denied)")?;
 
     let parent = file_path.parent().unwrap_or(Path::new("/"));
 
@@ -74,11 +181,7 @@ pub fn can_quarantine(file_path: &Path) -> Result<()> {
 
 pub fn quarantine_command(file_path: &Path) -> String {
     let dest = quarantine_dir();
-    format!(
-        "sudo mv '{}' '{}/'",
-        file_path.display(),
-        dest.display(),
-    )
+    format!("sudo mv '{}' '{}/'", file_path.display(), dest.display(),)
 }
 
 fn is_path_accessible_in_snap(file_path: &Path) -> bool {
@@ -145,17 +248,22 @@ pub fn quarantine_file(file_path: &Path, threat_name: &str) -> Result<Quarantine
 
     // Copy the file to quarantine
     fs::create_dir_all(quarantine_dir())?;
-    fs::copy(file_path, &quarantine_path)
-        .context("Failed to copy file to quarantine")?;
+    fs::copy(file_path, &quarantine_path).context("Failed to copy file to quarantine")?;
 
     // Remove the original file
-    fs::remove_file(file_path)
-        .context("Failed to remove original infected file")?;
+    fs::remove_file(file_path).context("Failed to remove original infected file")?;
 
     // Create a zero-byte file in the original location to mark it as quarantined
     // (similar to ClamTK behavior)
     let marker_path = format!("{}.quarantined", file_path.display());
-    let _ = fs::write(&marker_path, format!("Quarantined by clamtk-rs\nThreat: {}\nQuarantine ID: {}\n", threat_name, &hash[..8]));
+    let _ = fs::write(
+        &marker_path,
+        format!(
+            "Quarantined by clamtk-rs\nThreat: {}\nQuarantine ID: {}\n",
+            threat_name,
+            &hash[..8]
+        ),
+    );
 
     let entry = QuarantineEntry {
         id: hash[..8].to_string(),
@@ -186,20 +294,23 @@ pub fn restore_file(entry_id: &str) -> Result<PathBuf> {
     let entry = &entries[entry_idx];
 
     if !entry.quarantine_path.exists() {
-        anyhow::bail!("Quarantined file not found: {}", entry.quarantine_path.display());
+        anyhow::bail!(
+            "Quarantined file not found: {}",
+            entry.quarantine_path.display()
+        );
     }
 
     // Copy back from quarantine
-    let original_dir = entry
-        .original_path
-        .parent()
-        .unwrap_or(Path::new("/tmp"));
+    let original_dir = entry.original_path.parent().unwrap_or(Path::new("/tmp"));
     fs::create_dir_all(original_dir)?;
 
     // If original location still has a file, restore with a suffix
     let restore_path = if entry.original_path.exists() {
         let mut p = entry.original_path.clone();
-        p.set_extension(format!("restored.{}", chrono::Local::now().format("%Y%m%d%H%M%S")));
+        p.set_extension(format!(
+            "restored.{}",
+            chrono::Local::now().format("%Y%m%d%H%M%S")
+        ));
         p
     } else {
         entry.original_path.clone()
@@ -260,4 +371,108 @@ pub fn purge_all() -> Result<usize> {
 
     save_entries(&[])?;
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::testutil;
+
+    fn entry(id: &str, quarantine_path: &Path) -> QuarantineEntry {
+        QuarantineEntry {
+            id: id.into(),
+            original_path: PathBuf::from("/home/u/Documents/report.pdf"),
+            threat_name: "Eicar-Test-Signature".into(),
+            quarantine_path: quarantine_path.to_path_buf(),
+            quarantined_at: chrono::Local::now(),
+            file_hash: "abc123".into(),
+            file_size: 68,
+            restored: false,
+        }
+    }
+
+    fn write_metadata(dir: &Path, entries: &[QuarantineEntry]) {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(
+            dir.join("metadata.json"),
+            serde_json::to_string_pretty(entries).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Files quarantined by a previous snap revision must move to the current
+    /// location, with their recorded paths repointed so restore/delete/purge
+    /// still find them.
+    #[test]
+    fn migration_moves_files_and_repoints_entries() {
+        let root = testutil::temp_dir("quarantine_migrate");
+        let old_dir = root.join("snap/clamtk-rs/39/quarantine");
+        let new_dir = root.join("common/quarantine");
+
+        let name = "eicar.pdf.quarantined";
+        write_metadata(&old_dir, &[entry("abc123", &old_dir.join(name))]);
+        fs::write(old_dir.join(name), b"infected").unwrap();
+
+        migrate_quarantine_dir(&old_dir, &new_dir);
+
+        assert!(
+            new_dir.join("metadata.json").is_file(),
+            "metadata not moved"
+        );
+        assert_eq!(
+            fs::read(new_dir.join(name)).unwrap(),
+            b"infected",
+            "quarantined file not moved"
+        );
+        assert!(!old_dir.exists(), "old directory should be gone");
+
+        let entries = read_entries(&new_dir.join("metadata.json")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "abc123");
+        assert_eq!(entries[0].quarantine_path, new_dir.join(name));
+        assert!(
+            entries[0].quarantine_path.exists(),
+            "repointed path does not resolve"
+        );
+
+        testutil::cleanup(&root);
+    }
+
+    /// Metadata without any matching file must not be resurrected as an empty
+    /// quarantine directory.
+    #[test]
+    fn migration_is_a_no_op_without_metadata() {
+        let root = testutil::temp_dir("quarantine_empty");
+        let old_dir = root.join("snap/clamtk-rs/39/quarantine");
+        let new_dir = root.join("common/quarantine");
+        fs::create_dir_all(&old_dir).unwrap();
+
+        migrate_quarantine_dir(&old_dir, &new_dir);
+
+        assert!(!new_dir.exists());
+        assert!(old_dir.is_dir(), "source must be left alone");
+
+        testutil::cleanup(&root);
+    }
+
+    /// An already-migrated quarantine must never be overwritten by the contents
+    /// of an older revision.
+    #[test]
+    fn migration_never_overwrites_existing_quarantine() {
+        let root = testutil::temp_dir("quarantine_keep");
+        let old_dir = root.join("snap/clamtk-rs/39/quarantine");
+        let new_dir = root.join("common/quarantine");
+
+        write_metadata(&old_dir, &[entry("old", &old_dir.join("old.bin"))]);
+        write_metadata(&new_dir, &[entry("new", &new_dir.join("new.bin"))]);
+
+        migrate_quarantine_dir(&old_dir, &new_dir);
+
+        let entries = read_entries(&new_dir.join("metadata.json")).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].id, "new");
+        assert!(old_dir.is_dir(), "source must be left alone");
+
+        testutil::cleanup(&root);
+    }
 }

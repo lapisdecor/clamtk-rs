@@ -141,15 +141,15 @@ pub fn snap_freshclam_config_path() -> Option<std::path::PathBuf> {
 /// its path. Called before running freshclam inside a snap.
 pub fn write_snap_freshclam_config() -> Result<std::path::PathBuf> {
     let db_dir = crate::utils::snap_database_dir()
-        .context("SNAP_USER_DATA is not set; not running inside a snap")?;
-    let certs_dir = crate::utils::snap_cvdcerts_dir()
-        .context("SNAP is not set; not running inside a snap")?;
+        .context("SNAP_USER_COMMON is not set; not running inside a snap")?;
+    let certs_dir =
+        crate::utils::snap_cvdcerts_dir().context("SNAP is not set; not running inside a snap")?;
 
     std::fs::create_dir_all(&db_dir)
         .with_context(|| format!("Failed to create database directory {}", db_dir.display()))?;
 
     let config_path = snap_freshclam_config_path()
-        .context("SNAP_USER_DATA is not set; not running inside a snap")?;
+        .context("SNAP_USER_COMMON is not set; not running inside a snap")?;
 
     let config = format!(
         "DatabaseDirectory {}\n\
@@ -179,14 +179,12 @@ pub fn snap_database_available() -> bool {
 
     std::fs::read_dir(&db_dir)
         .map(|entries| {
-            entries
-                .filter_map(|e| e.ok())
-                .any(|e| {
-                    e.path()
-                        .extension()
-                        .map(|ext| ext == "cvd" || ext == "cld")
-                        .unwrap_or(false)
-                })
+            entries.filter_map(|e| e.ok()).any(|e| {
+                e.path()
+                    .extension()
+                    .map(|ext| ext == "cvd" || ext == "cld")
+                    .unwrap_or(false)
+            })
         })
         .unwrap_or(false)
 }

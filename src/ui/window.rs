@@ -2,18 +2,18 @@ use std::rc::Rc;
 
 use gtk4::prelude::*;
 use gtk4::{
-    Application, ApplicationWindow, Box, Button, HeaderBar, Label, ListBox, ListBoxRow,
-    Orientation, Separator, Stack, StackTransitionType,
-    PolicyType, ScrolledWindow, Image, CssProvider, STYLE_PROVIDER_PRIORITY_USER,
+    Application, ApplicationWindow, Box, Button, CssProvider, HeaderBar, Image, Label, ListBox,
+    ListBoxRow, Orientation, PolicyType, ScrolledWindow, Separator, Stack, StackTransitionType,
+    STYLE_PROVIDER_PRIORITY_USER,
 };
 
-use crate::ui::dashboard::DashboardPage;
-use crate::ui::scan_page::ScanPage;
-use crate::ui::update_page::UpdatePage;
-use crate::ui::quarantine_page::QuarantinePage;
-use crate::ui::history_page::HistoryPage;
-use crate::ui::settings_page::SettingsPage;
 use crate::ui::about::show_about_dialog;
+use crate::ui::dashboard::DashboardPage;
+use crate::ui::history_page::HistoryPage;
+use crate::ui::quarantine_page::QuarantinePage;
+use crate::ui::scan_page::ScanPage;
+use crate::ui::settings_page::SettingsPage;
+use crate::ui::update_page::UpdatePage;
 
 pub struct MainWindow {
     window: ApplicationWindow,
@@ -68,7 +68,7 @@ impl MainWindow {
                 font-size: 12px;
                 color: @theme_fg_color;
             }
-            "#
+            "#,
         );
         gtk4::style_context_add_provider_for_display(
             &gtk4::prelude::WidgetExt::display(&window),
@@ -114,7 +114,11 @@ impl MainWindow {
         stack.add_titled(dashboard.container(), Some("dashboard"), "Dashboard");
         stack.add_titled(scan_page.container(), Some("scan"), "Scan");
         stack.add_titled(update_page.container(), Some("update"), "Update");
-        stack.add_titled(quarantine_page.container(), Some("quarantine"), "Quarantine");
+        stack.add_titled(
+            quarantine_page.container(),
+            Some("quarantine"),
+            "Quarantine",
+        );
         stack.add_titled(history_page.container(), Some("history"), "History");
         stack.add_titled(settings_page.container(), Some("settings"), "Settings");
 
@@ -199,9 +203,7 @@ impl MainWindow {
         // Select first page
         stack.set_visible_child_name("dashboard");
 
-        let mw = MainWindow {
-            window,
-        };
+        let mw = MainWindow { window };
 
         mw
     }
@@ -213,6 +215,41 @@ impl MainWindow {
     pub fn window_ref(&self) -> &ApplicationWindow {
         &self.window
     }
+}
+
+/// Tell the user about directories the app could not prepare, instead of
+/// refusing to start. Called once, when the main window is first shown.
+pub fn show_startup_warnings(parent: &ApplicationWindow, warnings: &[String]) {
+    if warnings.is_empty() {
+        return;
+    }
+    log::warn!("startup warnings: {}", warnings.join(" "));
+
+    let dialog = gtk4::MessageDialog::builder()
+        .transient_for(parent)
+        .modal(true)
+        .text("Some folders are not available")
+        .secondary_text(
+            "ClamTK-rs could not prepare the following folder(s). The rest of the \
+             application works, but the affected feature will not. You can change \
+             these locations in Settings.",
+        )
+        .message_type(gtk4::MessageType::Warning)
+        .buttons(gtk4::ButtonsType::Close)
+        .build();
+    dialog.content_area().set_size_request(450, -1);
+
+    for warning in warnings {
+        let label = gtk4::Label::new(Some(warning));
+        label.set_halign(gtk4::Align::Start);
+        label.set_wrap(true);
+        label.set_selectable(true);
+        label.set_margin_top(6);
+        dialog.content_area().append(&label);
+    }
+
+    dialog.connect_response(|dlg, _| dlg.close());
+    dialog.show();
 }
 
 fn build_sidebar() -> ListBox {

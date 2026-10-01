@@ -1,6 +1,6 @@
+use glib::ExitCode;
 use gtk4::prelude::*;
 use gtk4::{Application, ApplicationWindow};
-use glib::ExitCode;
 
 use crate::ui::window::MainWindow;
 
@@ -8,16 +8,17 @@ const APP_ID: &str = "com.gatochalupa.clamtk-rs";
 
 pub struct App {
     gtk_app: Application,
+    warnings: Vec<String>,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn new(warnings: Vec<String>) -> Self {
         let gtk_app = Application::builder()
             .application_id(APP_ID)
             .flags(gio::ApplicationFlags::HANDLES_OPEN)
             .build();
 
-        let app = App { gtk_app };
+        let app = App { gtk_app, warnings };
         app.setup_signals();
         app
     }
@@ -34,11 +35,19 @@ impl App {
             }
         });
 
-        self.gtk_app.connect_activate(|gtk_app| {
+        let warnings = self.warnings.clone();
+        self.gtk_app.connect_activate(move |gtk_app| {
             let main_window = MainWindow::new(gtk_app);
             let win_ref = main_window.window_ref().clone();
+            let warnings = warnings.clone();
+            let shown = std::cell::Cell::new(false);
             main_window.window_ref().connect_map(move |_| {
                 crate::ui::snap_setup::show_if_needed(&win_ref);
+                // `connect_map` fires on every show; warn only once.
+                if !shown.get() {
+                    shown.set(true);
+                    crate::ui::window::show_startup_warnings(&win_ref, &warnings);
+                }
             });
             main_window.present();
         });

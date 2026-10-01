@@ -111,6 +111,147 @@ pub fn is_running_in_snap() -> bool {
     std::env::var_os("SNAP").is_some()
 }
 
+/// The snap's revision-independent writable data directory,
+/// `$SNAP_USER_COMMON` (`~/snap/<name>/common`).
+///
+/// Everything the app must survive a `snap refresh` belongs here rather than in
+/// `$SNAP_USER_DATA`: the latter embeds the revision, and snapd's AppArmor
+/// profile grants write access only to the *current* revision directory
+/// (`owner @{HOME}/snap/@{SNAP_INSTANCE_NAME}/@{SNAP_REVISION}/** wl`) while all
+/// other revisions are read-only (`.../** mrkix`). Storing a path built from
+/// `$SNAP_USER_DATA` therefore dangles after a refresh.
+pub fn snap_common_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("SNAP_USER_COMMON")
+        .map(std::path::PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty())
+        // Older/unusual environments may not export SNAP_USER_COMMON; the
+        // revision directory still works for a single-revision install.
+        .or_else(|| std::env::var_os("SNAP_USER_DATA").map(std::path::PathBuf::from))
+}
+
+/// True when `path` sits under a `~/snap/<name>/<revision>/...` directory and is
+/// not under `common` — i.e. it is a revision-scoped path that snapd copied
+/// forward from a previous revision and that can no longer be written to.
+///
+/// This is the shape of the `quarantine_dir` that older versions persisted,
+/// which is what made startup fail with `Permission denied (os error 13)`
+/// after a refresh. Anything else (a user-chosen location) is left alone.
+pub fn is_stale_snap_path(path: &std::path::Path, common: &std::path::Path) -> bool {
+    if path.starts_with(common) {
+        return false;
+    }
+    let mut components = path.components();
+    while let Some(component) = components.next() {
+        if component.as_os_str() != "snap" {
+            continue;
+        }
+        // ~/snap/<instance>/<revision>/... — the instance name is anything, the
+        // revision is a number.
+        let _instance = components.next();
+        return components.next().is_some_and(|revision| {
+            revision
+                .as_os_str()
+                .to_str()
+                .is_some_and(|r| !r.is_empty() && r.chars().all(|ch| ch.is_ascii_digit()))
+        });
+    }
+    false
+}
+
+/// Move one legacy revision-scoped file into its `$SNAP_USER_COMMON`
+/// equivalent, unless the destination already exists. Best effort: a failure
+/// only means the file is re-created at its new location.
+fn adopt_legacy_file(legacy: &std::path::Path, target: &std::path::Path) {
+    if !legacy.exists() || target.exists() {
+        return;
+    }
+    if let Some(parent) = target.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("could not create {}: {}", parent.display(), e);
+            return;
+        }
+    }
+    match std::fs::rename(legacy, target) {
+        Ok(()) => log::info!("migrated {} -> {}", legacy.display(), target.display()),
+        Err(e) => {
+            log::warn!("could not migrate {}: {}", legacy.display(), e);
+            // Cross-device or otherwise unrenameable: fall back to a copy.
+            match std::fs::copy(legacy, target) {
+                Ok(_) => {
+                    log::info!("copied {} -> {}", legacy.display(), target.display());
+                    let _ = std::fs::remove_file(legacy);
+                }
+                Err(e) => log::warn!("could not copy {}: {}", legacy.display(), e),
+            }
+        }
+    }
+}
+
+/// Move one legacy revision-scoped directory into its `$SNAP_USER_COMMON`
+/// equivalent, unless the destination already exists. Best effort: on failure
+/// the destination is simply re-created and the data re-downloaded.
+fn adopt_legacy_dir(legacy: &std::path::Path, target: &std::path::Path) {
+    if !legacy.is_dir() || target.exists() {
+        return;
+    }
+    if let Some(parent) = target.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("could not create {}: {}", parent.display(), e);
+            return;
+        }
+    }
+    // Rename is cheap (same filesystem) even for the ~100 MB signature set.
+    if let Err(e) = std::fs::rename(legacy, target) {
+        log::warn!("could not migrate {}: {}", legacy.display(), e);
+        return;
+    }
+    log::info!("migrated {} -> {}", legacy.display(), target.display());
+}
+
+/// Point the XDG base directories at `$SNAP_USER_COMMON` when running as a snap.
+///
+/// Without this, `dirs::config_dir()`/`data_dir()`/`cache_dir()` resolve against
+/// `$HOME`, which snapd sets to the revision directory, so settings, history and
+/// cached data would be tied to a single revision. Must be called before the
+/// first `dirs::*` use.
+pub fn init_persistent_dirs() {
+    if !is_running_in_snap() {
+        return;
+    }
+    let Some(common) = snap_common_dir() else {
+        return;
+    };
+
+    // Carry the per-revision data forward once, so settings, scan history and
+    // the downloaded virus signatures survive the move to the common directory.
+    if let Some(user_data) = std::env::var_os("SNAP_USER_DATA") {
+        let legacy = std::path::PathBuf::from(user_data);
+        for (sub, file) in [(".config", "config.json"), (".local/share", "history.json")] {
+            adopt_legacy_file(
+                &legacy.join(sub).join("clamtk-rs").join(file),
+                &common.join(sub).join("clamtk-rs").join(file),
+            );
+        }
+        adopt_legacy_dir(&legacy.join("clamav"), &common.join("clamav"));
+        // The generated config is rewritten on every run, so it needs no move.
+        let _ = std::fs::remove_file(legacy.join("freshclam.conf"));
+    }
+
+    for (var, sub) in [
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_CACHE_HOME", ".cache"),
+    ] {
+        let current = std::env::var_os(var);
+        let already_revision_independent = current
+            .as_deref()
+            .is_some_and(|v| std::path::Path::new(v).starts_with(&common));
+        if !already_revision_independent {
+            std::env::set_var(var, common.join(sub));
+        }
+    }
+}
+
 /// The real home directory of the invoking user. Inside a snap, `$HOME` is
 /// redirected to the snap's private data directory, but the actual user home
 /// (used by "Scan Home") is the one listed in /etc/passwd for the current UID.
@@ -143,11 +284,12 @@ fn current_uid() -> Option<u32> {
 }
 
 /// When running inside a snap, the bundled ClamAV keeps its signature database
-/// under `$SNAP_USER_DATA/clamav`. This directory is owned by the invoking
-/// user and therefore writable, unlike `$SNAP_DATA` which is owned by root.
+/// under `$SNAP_USER_COMMON/clamav`. This directory is owned by the invoking
+/// user and therefore writable, unlike `$SNAP_DATA` which is owned by root, and
+/// unlike `$SNAP_USER_DATA` it survives a refresh instead of forcing a
+/// re-download of the ~100 MB signature sets on every snap update.
 pub fn snap_database_dir() -> Option<std::path::PathBuf> {
-    let snap_user_data = std::env::var_os("SNAP_USER_DATA")?;
-    Some(std::path::Path::new(&snap_user_data).join("clamav"))
+    Some(snap_common_dir()?.join("clamav"))
 }
 
 /// When running inside a snap, point libclamav at the code-signature
@@ -182,8 +324,97 @@ pub fn is_host_ubuntu() -> bool {
 }
 
 #[cfg(test)]
+pub(crate) mod testutil {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Mutex, MutexGuard};
+
+    static COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Serialises tests that change the process environment, which is global.
+    pub(crate) fn env_lock() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// A fresh, empty scratch directory unique to the calling test.
+    pub(crate) fn temp_dir(name: &str) -> PathBuf {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("clamtk_rs_{}_{}_{}", name, std::process::id(), n));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("could not create scratch directory");
+        dir
+    }
+
+    /// Remove a scratch directory, restoring write permission first.
+    pub(crate) fn cleanup(dir: &Path) {
+        make_writable(dir);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Restore write permission recursively, so a test can clean up after
+    /// itself even if it made a directory read-only.
+    pub(crate) fn make_writable(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|t| t.is_dir()) {
+                    make_writable(&entry.path());
+                }
+            }
+        }
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn revision_scoped_paths_are_stale() {
+        let common = std::path::Path::new("/home/u/snap/clamtk-rs/common");
+        assert!(is_stale_snap_path(
+            std::path::Path::new("/home/u/snap/clamtk-rs/39/quarantine"),
+            common
+        ));
+        assert!(is_stale_snap_path(
+            std::path::Path::new("/home/u/snap/clamtk-rs/39"),
+            common
+        ));
+        assert!(is_stale_snap_path(
+            std::path::Path::new("/home/u/snap/clamtk-rs/1007/clamav"),
+            common
+        ));
+    }
+
+    #[test]
+    fn common_and_user_chosen_paths_are_not_stale() {
+        let common = std::path::Path::new("/home/u/snap/clamtk-rs/common");
+        assert!(!is_stale_snap_path(
+            std::path::Path::new("/home/u/snap/clamtk-rs/common/quarantine"),
+            common
+        ));
+        assert!(!is_stale_snap_path(
+            std::path::Path::new("/srv/clamtk-quarantine"),
+            common
+        ));
+        assert!(!is_stale_snap_path(
+            std::path::Path::new("/home/u/.local/share/clamtk-rs/quarantine"),
+            common
+        ));
+        // A directory that merely starts with "snap" is unrelated.
+        assert!(!is_stale_snap_path(
+            std::path::Path::new("/home/u/snapshots/clamtk/quarantine"),
+            common
+        ));
+        // Another snap's common directory is not ours to rewrite.
+        assert!(!is_stale_snap_path(
+            std::path::Path::new("/home/u/snap/other-snap/common/quarantine"),
+            common
+        ));
+    }
 
     #[test]
     fn chirp_wav_is_bundled_and_playable() {

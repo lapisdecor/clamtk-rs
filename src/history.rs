@@ -51,7 +51,7 @@ pub fn add_entry(entry: &HistoryEntry) -> Result<()> {
     }
 
     // Sort by timestamp descending
-    entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.timestamp));
 
     save_entries(&entries)
 }

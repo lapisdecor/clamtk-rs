@@ -1,6 +1,6 @@
 [package]
 name = "clamtk-rs"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 description = "A GTK4 graphical frontend for ClamAV — Rust port of ClamTK"
 license = "GPL-3.0-or-later"

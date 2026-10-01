@@ -13,10 +13,17 @@ fn main() -> anyhow::Result<()> {
     // Register the compiled gresource (bundled app icon)
     let _ = gio::resources_register_include!("clamtk_rs.gresource");
 
-    // Ensure config directories exist
-    config::ensure_dirs()?;
+    // Under a snap, keep settings, history and virus signatures in
+    // $SNAP_USER_COMMON so they survive a refresh. Must run before the first
+    // `dirs::*` lookup.
+    utils::init_persistent_dirs();
 
-    let app = app::App::new();
+    // Ensure the directories we write to exist. Problems are reported to the
+    // user rather than aborting, so a single unwritable directory cannot make
+    // the app fail to start.
+    let warnings = config::ensure_dirs();
+
+    let app = app::App::new(warnings);
     app.run();
 
     Ok(())
