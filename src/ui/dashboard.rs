@@ -12,6 +12,7 @@ pub struct DashboardPage {
     version_value: Label,
     sig_value: Label,
     sig_ver_value: Label,
+    cd_label: Label,
     cd_value: Label,
 }
 
@@ -153,6 +154,13 @@ impl DashboardPage {
         };
         grid.attach(&cd_label, 0, 5, 1, 1);
         grid.attach(&cd_value, 1, 5, 1, 1);
+        if crate::utils::is_running_in_snap() && !info.is_clamd_available {
+            cd_label.set_visible(false);
+            cd_value.set_visible(false);
+        } else {
+            cd_label.set_visible(true);
+            cd_value.set_visible(true);
+        }
 
         // Make the first column wider
         let first_col_label = Label::builder()
@@ -234,6 +242,7 @@ impl DashboardPage {
             version_value,
             sig_value,
             sig_ver_value,
+            cd_label,
             cd_value,
         }
     }
@@ -257,6 +266,8 @@ impl DashboardPage {
         self.sig_ver_value.set_label(&info.signature_version);
 
         if info.is_clamd_available {
+            self.cd_label.set_visible(true);
+            self.cd_value.set_visible(true);
             if clamav::is_clamd_running() {
                 self.cd_value.set_label("● Running");
                 self.cd_value.set_css_classes(&["status-good"]);
@@ -264,7 +275,12 @@ impl DashboardPage {
                 self.cd_value.set_label("● Available (not running)");
                 self.cd_value.set_css_classes(&["status-warn"]);
             }
+        } else if crate::utils::is_running_in_snap() {
+            self.cd_label.set_visible(false);
+            self.cd_value.set_visible(false);
         } else {
+            self.cd_label.set_visible(true);
+            self.cd_value.set_visible(true);
             self.cd_value.set_label("● Not Available");
             self.cd_value.set_css_classes(&["status-bad"]);
         }
