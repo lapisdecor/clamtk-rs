@@ -71,7 +71,7 @@ parts:
     build-environment:
       - PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/snap/bin"
       - LD_LIBRARY_PATH: ""
-      - LDFLAGS: "-Wl,-rpath=\\$ORIGIN/../usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR"
+      - LDFLAGS: "-Wl,-rpath=\\$ORIGIN/../usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR,-rpath-link,$SNAPCRAFT_GNOME_SDK/usr/lib/$CRAFT_ARCH_TRIPLET_BUILD_FOR"
 
   launcher:
     plugin: dump
