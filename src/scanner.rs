@@ -10,6 +10,11 @@ use std::thread;
 use crate::config::AppConfig;
 use crate::history;
 
+/// Minimum time between two progress messages. clamscan prints one line per
+/// file, so on a fast filesystem that can be thousands of lines per second;
+/// throttling keeps the UI responsive without losing accuracy.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScanResult {
     pub path: String,
@@ -174,6 +179,17 @@ impl Scanner {
             let stdout = child.stdout.take().expect("stdout should be piped");
             let stderr = child.stderr.take().expect("stderr should be piped");
 
+            // The download message (if any) is stale by now; tell the user the
+            // actual scan is under way. clamscan spends a while loading the
+            // signature database before it prints the first result, so this
+            // also keeps the status text accurate in the meantime.
+            let _ = tx.send(ScanMessage::Progress {
+                current_file: "Starting scan...".into(),
+                files_scanned: 0,
+                known_threats: 0,
+                total_files,
+            });
+
             // Drain stderr on its own thread so the pipe never fills up and
             // blocks clamscan; the collected text is used for diagnostics.
             let stderr_thread = thread::spawn(move || {
@@ -194,9 +210,10 @@ impl Scanner {
             // Read stdout incrementally
             let reader = std::io::BufReader::new(stdout);
             let mut files_scanned = 0u64;
-            let known_threats = 0u64;
+            let mut known_threats = 0u64;
+            let mut summary_files_scanned = 0u64;
             let mut results = Vec::new();
-            let mut all_lines = Vec::new();
+            let mut last_progress = std::time::Instant::now() - PROGRESS_INTERVAL;
 
             for line_result in reader.lines() {
                 // Check if cancelled
@@ -215,8 +232,6 @@ impl Scanner {
                     Err(_) => break,
                 };
 
-                all_lines.push(line.clone());
-
                 if line.trim().is_empty()
                     || line.starts_with("-----")
                     || line.starts_with("Scan started")
@@ -224,48 +239,37 @@ impl Scanner {
                     continue;
                 }
 
-                // Parse per-file results in real time
-                if line.contains("FOUND") {
+                // Parse per-file results in real time. clamscan prints
+                // "<path>: OK", "<path>: <threat> FOUND" and
+                // "<path>: <reason> ERROR" for every file it processes.
+                let mut current_file: Option<String> = None;
+
+                if line.ends_with(" FOUND") {
                     if let Some(pos) = line.rfind(": ") {
                         let path = line[..pos].to_string();
-                        let rest = &line[pos + 2..];
-                        let threat = rest.replace("FOUND", "").trim().to_string();
+                        let threat = line[pos + 2..]
+                            .trim_end_matches(" FOUND")
+                            .trim()
+                            .to_string();
                         files_scanned += 1;
+                        known_threats += 1;
                         let result = ScanResult {
                             path: path.clone(),
                             status: FileStatus::Infected,
-                            threat: Some(threat.clone()),
+                            threat: Some(threat),
                         };
                         results.push(result.clone());
                         let _ = tx.send(ScanMessage::FileResult(result));
-                        let _ = tx.send(ScanMessage::Progress {
-                            current_file: path,
-                            files_scanned,
-                            known_threats,
-                            total_files,
-                        });
-                        continue;
+                        current_file = Some(path);
                     }
-                } else if line.contains("OK") {
+                } else if line.ends_with(": OK") {
                     if let Some(pos) = line.rfind(": ") {
-                        let path = line[..pos].to_string();
+                        // Clean files are not listed individually; they only
+                        // count towards the progress bar.
                         files_scanned += 1;
-                        let result = ScanResult {
-                            path: path.clone(),
-                            status: FileStatus::Clean,
-                            threat: None,
-                        };
-                        results.push(result.clone());
-                        let _ = tx.send(ScanMessage::FileResult(result));
-                        let _ = tx.send(ScanMessage::Progress {
-                            current_file: path,
-                            files_scanned,
-                            known_threats,
-                            total_files,
-                        });
-                        continue;
+                        current_file = Some(line[..pos].to_string());
                     }
-                } else if line.contains("ERROR") {
+                } else if line.ends_with(" ERROR") {
                     if let Some(pos) = line.rfind(": ") {
                         let path = line[..pos].to_string();
                         files_scanned += 1;
@@ -276,24 +280,29 @@ impl Scanner {
                         };
                         results.push(result.clone());
                         let _ = tx.send(ScanMessage::FileResult(result));
+                        current_file = Some(path);
+                    }
+                } else {
+                    let lower = line.trim().to_lowercase();
+                    if lower.starts_with("scanned files:") {
+                        summary_files_scanned = lower
+                            .split(':')
+                            .nth(1)
+                            .and_then(|v| v.trim().parse::<u64>().ok())
+                            .unwrap_or(0);
+                    }
+                }
+
+                if let Some(path) = current_file {
+                    if last_progress.elapsed() >= PROGRESS_INTERVAL {
+                        last_progress = std::time::Instant::now();
                         let _ = tx.send(ScanMessage::Progress {
                             current_file: path,
                             files_scanned,
                             known_threats,
                             total_files,
                         });
-                        continue;
                     }
-                }
-
-                // Count summary lines for progress too
-                let lower = line.trim().to_lowercase();
-                if lower.starts_with("scanned directories:")
-                    || lower.starts_with("scanned files:")
-                {
-                    files_scanned += lower.split(':').nth(1)
-                        .and_then(|v| v.trim().parse::<u64>().ok())
-                        .unwrap_or(0);
                 }
             }
 
@@ -328,11 +337,10 @@ impl Scanner {
                 return;
             }
 
-            // Parse summary from collected lines
-            let full_output = all_lines.join("\n");
-            let summary = parse_clamscan_summary(&full_output);
-            if summary.files_scanned > 0 {
-                files_scanned = summary.files_scanned;
+            // The summary is authoritative: it also counts files that were not
+            // printed individually (empty files, excluded paths, ...).
+            if summary_files_scanned > 0 {
+                files_scanned = summary_files_scanned;
             }
 
             // Check exit code. clamscan exits with 2 when *anything* went
@@ -435,83 +443,6 @@ fn count_files(path: &std::path::Path) -> u64 {
         .filter_map(|e| e.ok())
         .filter(|e| e.file_type().is_file())
         .count() as u64
-}
-
-#[derive(Debug)]
-struct ScanSummary {
-    files_scanned: u64,
-}
-
-fn parse_clamscan_output(output: &str) -> Vec<ScanResult> {
-    let mut results = Vec::new();
-
-    for line in output.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with("-----") || line.starts_with("Scan started") {
-            continue;
-        }
-
-        if line.contains("FOUND") {
-            if let Some(pos) = line.rfind(": ") {
-                let path = line[..pos].to_string();
-                let rest = &line[pos + 2..];
-                let threat = rest.replace("FOUND", "").trim().to_string();
-                results.push(ScanResult {
-                    path,
-                    status: FileStatus::Infected,
-                    threat: Some(threat),
-                });
-            }
-        } else if line.contains("OK") {
-            if let Some(pos) = line.rfind(": ") {
-                let path = line[..pos].to_string();
-                results.push(ScanResult {
-                    path,
-                    status: FileStatus::Clean,
-                    threat: None,
-                });
-            }
-        } else if line.contains("ERROR") {
-            if let Some(pos) = line.rfind(": ") {
-                let path = line[..pos].to_string();
-                results.push(ScanResult {
-                    path,
-                    status: FileStatus::Error,
-                    threat: None,
-                });
-            }
-        }
-    }
-
-    results
-}
-
-fn parse_clamscan_summary(output: &str) -> ScanSummary {
-    let mut files_scanned = 0u64;
-
-    for line in output.lines() {
-        let line = line.trim().to_lowercase();
-        if line.starts_with("engine version:") {
-            // skip
-        }
-        if line.starts_with("scanned directories:") || line.starts_with("scanned files:") {
-            if let Some(v) = line.split(':').nth(1) {
-                files_scanned += v.trim().parse().unwrap_or(0);
-            }
-        }
-        if line.starts_with("infected files:") {
-            // We could also track this separately
-        }
-    }
-
-    if files_scanned == 0 {
-        let parsed = parse_clamscan_output(output);
-        files_scanned = parsed.len() as u64;
-    }
-
-    ScanSummary {
-        files_scanned,
-    }
 }
 
 impl Default for Scanner {

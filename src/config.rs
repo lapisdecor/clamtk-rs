@@ -198,7 +198,9 @@ impl AppConfig {
             args.push(path.clone());
         }
 
-        args.push("--infected".into());
+        // Do not pass `--infected`: it suppresses the per-file "OK" lines that
+        // the scanner parses to drive the progress bar. Clean files are still
+        // not added to the results list, they only count towards progress.
         args.push("--bell".into());
 
         args

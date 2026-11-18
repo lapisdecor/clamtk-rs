@@ -181,217 +181,237 @@ impl ScanPage {
             // Process messages from the scanner
             glib::spawn_future_local(async move {
                 let mut total_files = 0u64;
+                let mut last_progress = std::time::Instant::now();
 
                 loop {
                     // Use glib idle to check for messages
                     let _msg = glib::timeout_future(std::time::Duration::from_millis(100)).await;
 
-                    match rx.try_recv() {
-                        Ok(ScanMessage::Started { target, scan_type, total_files: tf }) => {
-                            total_files = tf;
-                            let type_str = match scan_type {
-                                ScanType::File => "File",
-                                ScanType::Directory => "Directory",
-                                ScanType::Home => "Home Directory",
-                                ScanType::FullSystem => "Full System",
-                                ScanType::Custom => "Custom",
-                            };
-                            if total_files > 0 {
-                                pb.set_text(Some(&format!(
-                                    "Scanning: {} ({}) — {} files to scan",
-                                    target, type_str, total_files
-                                )));
-                            } else {
-                                pb.set_text(Some(&format!("Scanning: {} ({})", target, type_str)));
-                            }
-                            cfl.set_label(&format!("Scanning: {}", target));
-                        }
-                        Ok(ScanMessage::Progress { current_file, files_scanned, known_threats, total_files: tf }) => {
-                            if tf > 0 {
+                    // Drain every pending message. Handling only one message per
+                    // tick made the UI fall behind clamscan's per-file output,
+                    // which left the progress bar frozen until the scan ended.
+                    loop {
+                        let msg = match rx.try_recv() {
+                            Ok(msg) => msg,
+                            Err(crossbeam_channel::TryRecvError::Empty) => break,
+                            Err(crossbeam_channel::TryRecvError::Disconnected) => return,
+                        };
+
+                        match msg {
+                            ScanMessage::Started { target, scan_type, total_files: tf } => {
                                 total_files = tf;
-                            }
-                            cfl.set_label(&crate::utils::truncate_path(&current_file, 80));
-                            if total_files > 0 {
-                                let fraction = (files_scanned as f64 / total_files as f64).clamp(0.0, 1.0);
-                                pb.set_fraction(fraction);
-                                let pct = fraction * 100.0;
-                                let mut text = format!(
-                                    "{:.1}% — Files scanned: {} of {}",
-                                    pct, files_scanned, total_files
-                                );
-                                if known_threats > 0 {
-                                    text.push_str(&format!("  —  Threats found: {}", known_threats));
-                                }
-                                pb.set_text(Some(&text));
-                            } else {
-                                pb.pulse();
-                                if files_scanned == 0 {
-                                    pb.set_text(Some(&current_file));
+                                let type_str = match scan_type {
+                                    ScanType::File => "File",
+                                    ScanType::Directory => "Directory",
+                                    ScanType::Home => "Home Directory",
+                                    ScanType::FullSystem => "Full System",
+                                    ScanType::Custom => "Custom",
+                                };
+                                if total_files > 0 {
+                                    pb.set_text(Some(&format!(
+                                        "Scanning: {} ({}) — {} files to scan",
+                                        target, type_str, total_files
+                                    )));
                                 } else {
-                                    pb.set_text(Some(&format!("Files scanned: {}", files_scanned)));
+                                    pb.set_text(Some(&format!(
+                                        "Scanning: {} ({})",
+                                        target, type_str
+                                    )));
+                                }
+                                cfl.set_label(&format!("Scanning: {}", target));
+                            }
+                            ScanMessage::Progress { current_file, files_scanned, known_threats, total_files: tf } => {
+                                last_progress = std::time::Instant::now();
+                                if tf > 0 {
+                                    total_files = tf;
+                                }
+                                cfl.set_label(&crate::utils::truncate_path(&current_file, 80));
+                                if total_files > 0 && files_scanned > 0 {
+                                    let fraction = (files_scanned as f64 / total_files as f64).clamp(0.0, 1.0);
+                                    pb.set_fraction(fraction);
+                                    let pct = fraction * 100.0;
+                                    let mut text = format!(
+                                        "{:.1}% — Files scanned: {} of {}",
+                                        pct, files_scanned, total_files
+                                    );
+                                    if known_threats > 0 {
+                                        text.push_str(&format!("  —  Threats found: {}", known_threats));
+                                    }
+                                    pb.set_text(Some(&text));
+                                } else {
+                                    pb.pulse();
+                                    if files_scanned == 0 {
+                                        pb.set_text(Some(&current_file));
+                                    } else {
+                                        pb.set_text(Some(&format!("Files scanned: {}", files_scanned)));
+                                    }
                                 }
                             }
-                        }
-                        Ok(ScanMessage::FileResult(result)) => {
-                            let row = Box::new(Orientation::Horizontal, 8);
-                            row.set_margin_start(8);
-                            row.set_margin_end(8);
-                            row.set_margin_top(4);
-                            row.set_margin_bottom(4);
+                            ScanMessage::FileResult(result) => {
+                                let row = Box::new(Orientation::Horizontal, 8);
+                                row.set_margin_start(8);
+                                row.set_margin_end(8);
+                                row.set_margin_top(4);
+                                row.set_margin_bottom(4);
 
-                            let icon = match result.status {
-                                crate::scanner::FileStatus::Infected => "⚠️",
-                                crate::scanner::FileStatus::Clean => "✅",
-                                _ => "❓",
-                            };
-                            let icon_label = Label::builder()
-                                .label(icon)
-                                .build();
-                            let path_label = Label::builder()
-                                .label(&crate::utils::truncate_path(&result.path, 60))
-                                .halign(Align::Start)
-                                .hexpand(true)
-                                .build();
-                            row.append(&icon_label);
-                            row.append(&path_label);
-
-                            if result.status == crate::scanner::FileStatus::Infected {
-                                let threat = result.threat.unwrap_or_default();
-                                let threat_label = Label::builder()
-                                    .label(&threat)
-                                    .css_classes(["status-bad"])
-                                    .halign(Align::End)
+                                let icon = match result.status {
+                                    crate::scanner::FileStatus::Infected => "⚠️",
+                                    crate::scanner::FileStatus::Clean => "✅",
+                                    _ => "❓",
+                                };
+                                let icon_label = Label::builder()
+                                    .label(icon)
                                     .build();
-                                row.append(&threat_label);
-
-                                let q_btn = Button::builder()
-                                    .label("Quarantine")
-                                    .css_classes(["small-button"])
+                                let path_label = Label::builder()
+                                    .label(&crate::utils::truncate_path(&result.path, 60))
+                                    .halign(Align::Start)
+                                    .hexpand(true)
                                     .build();
-                                let path_for_q = result.path.clone();
-                                let threat_for_q = threat.clone();
-                                let sl_for_q = sl.clone();
-                                let wfq_for_q = wfq.clone();
-                                q_btn.connect_clicked(move |_| {
-                                    match crate::quarantine::quarantine_file(
-                                        std::path::Path::new(&path_for_q),
-                                        &threat_for_q,
-                                    ) {
-                                        Ok(_) => {
-                                    sl_for_q.set_label(&format!("Quarantined: {}", path_for_q));
-                                        }
-                                        Err(e) => {
-                                            if crate::utils::is_running_in_snap() {
-                                                show_snap_quarantine_dialog(
-                                                    &wfq_for_q,
-                                                    &path_for_q,
-                                                    &e.to_string(),
-                                                );
+                                row.append(&icon_label);
+                                row.append(&path_label);
+
+                                if result.status == crate::scanner::FileStatus::Infected {
+                                    let threat = result.threat.unwrap_or_default();
+                                    let threat_label = Label::builder()
+                                        .label(&threat)
+                                        .css_classes(["status-bad"])
+                                        .halign(Align::End)
+                                        .build();
+                                    row.append(&threat_label);
+
+                                    let q_btn = Button::builder()
+                                        .label("Quarantine")
+                                        .css_classes(["small-button"])
+                                        .build();
+                                    let path_for_q = result.path.clone();
+                                    let threat_for_q = threat.clone();
+                                    let sl_for_q = sl.clone();
+                                    let wfq_for_q = wfq.clone();
+                                    q_btn.connect_clicked(move |_| {
+                                        match crate::quarantine::quarantine_file(
+                                            std::path::Path::new(&path_for_q),
+                                            &threat_for_q,
+                                        ) {
+                                            Ok(_) => {
+                                                sl_for_q.set_label(&format!(
+                                                    "Quarantined: {}",
+                                                    path_for_q
+                                                ));
                                             }
-                                    sl_for_q.set_label(&format!("Quarantine failed: {}", e));
+                                            Err(e) => {
+                                                if crate::utils::is_running_in_snap() {
+                                                    show_snap_quarantine_dialog(
+                                                        &wfq_for_q,
+                                                        &path_for_q,
+                                                        &e.to_string(),
+                                                    );
+                                                }
+                                                sl_for_q.set_label(&format!(
+                                                    "Quarantine failed: {}",
+                                                    e
+                                                ));
+                                            }
+                                        }
+                                    });
+                                    row.append(&q_btn);
+                                }
+
+                                rb.append(&row);
+                            }
+                            ScanMessage::Completed {
+                                files_scanned,
+                                time_elapsed,
+                                results,
+                                warning,
+                            } => {
+                                pb.set_fraction(1.0);
+                                let infected_count = results.len();
+                                pb.set_text(Some("Scan complete"));
+                                if config.borrow().play_sound_on_complete {
+                                    crate::utils::play_chirp();
+                                }
+
+                                let note = warning
+                                    .map(|w| format!(" — Note: {}", w))
+                                    .unwrap_or_default();
+                                if infected_count == 0 {
+                                    sl.set_label(&format!(
+                                        "✅ Scan complete — No threats found. {} files scanned in {}.{}",
+                                        files_scanned,
+                                        crate::utils::format_duration(time_elapsed),
+                                        note
+                                    ));
+                                    sl.remove_css_class("status-bad");
+                                    sl.add_css_class("status-good");
+                                } else {
+                                    sl.set_label(&format!(
+                                        "⚠️ Scan complete — {} threat(s) found! {} files scanned in {}.{}",
+                                        infected_count,
+                                        files_scanned,
+                                        crate::utils::format_duration(time_elapsed),
+                                        note
+                                    ));
+                                    sl.remove_css_class("status-good");
+                                    sl.add_css_class("status-bad");
+                                }
+
+                                // Re-enable buttons
+                                cb.set_sensitive(false);
+                                let mut child = sbb.first_child();
+                                while let Some(c) = child {
+                                    if let Some(btn) = c.downcast_ref::<Button>() {
+                                        if btn.label().unwrap_or_default().as_str() != "⏹ Cancel Scan" {
+                                            btn.set_sensitive(true);
                                         }
                                     }
-                                });
-                                row.append(&q_btn);
+                                    child = c.next_sibling();
+                                }
+                                return;
                             }
-
-                            rb.append(&row);
-                        }
-                        Ok(ScanMessage::Completed {
-                            files_scanned,
-                            time_elapsed,
-                            results,
-                            warning,
-                        }) => {
-                            pb.set_fraction(1.0);
-                            let infected_count = results.len();
-                            pb.set_text(Some("Scan complete"));
-                            if config.borrow().play_sound_on_complete {
-                                crate::utils::play_chirp();
-                            }
-
-                            let note = warning
-                                .map(|w| format!(" — Note: {}", w))
-                                .unwrap_or_default();
-                            if infected_count == 0 {
-                                sl.set_label(&format!(
-                                    "✅ Scan complete — No threats found. {} files scanned in {}.{}",
-                                    files_scanned,
-                                    crate::utils::format_duration(time_elapsed),
-                                    note
-                                ));
-                                sl.remove_css_class("status-bad");
-                                sl.add_css_class("status-good");
-                            } else {
-                                sl.set_label(&format!(
-                                    "⚠️ Scan complete — {} threat(s) found! {} files scanned in {}.{}",
-                                    infected_count,
-                                    files_scanned,
-                                    crate::utils::format_duration(time_elapsed),
-                                    note
-                                ));
-                                sl.remove_css_class("status-good");
+                            ScanMessage::Error(msg) => {
+                                pb.set_fraction(0.0);
+                                pb.set_text(Some("Error"));
+                                sl.set_label(&format!("❌ {}", msg));
                                 sl.add_css_class("status-bad");
-                            }
 
-                            // Re-enable buttons
-                            cb.set_sensitive(false);
-                            let mut child = sbb.first_child();
-                            while let Some(c) = child {
-                                if let Some(btn) = c.downcast_ref::<Button>() {
-                                    if btn.label().unwrap_or_default().as_str() != "⏹ Cancel Scan" {
-                                        btn.set_sensitive(true);
+                                cb.set_sensitive(false);
+                                let mut child = sbb.first_child();
+                                while let Some(c) = child {
+                                    if let Some(btn) = c.downcast_ref::<Button>() {
+                                        if btn.label().unwrap_or_default().as_str() != "⏹ Cancel Scan" {
+                                            btn.set_sensitive(true);
+                                        }
                                     }
+                                    child = c.next_sibling();
                                 }
-                                child = c.next_sibling();
+                                return;
                             }
-                            return;
-                        }
-                        Ok(ScanMessage::Error(msg)) => {
-                            pb.set_fraction(0.0);
-                            pb.set_text(Some("Error"));
-                            sl.set_label(&format!("❌ {}", msg));
-                            sl.add_css_class("status-bad");
+                            ScanMessage::Cancelled => {
+                                pb.set_text(Some("Scan cancelled"));
+                                sl.set_label("Scan was cancelled.");
 
-                            cb.set_sensitive(false);
-                            let mut child = sbb.first_child();
-                            while let Some(c) = child {
-                                if let Some(btn) = c.downcast_ref::<Button>() {
-                                    if btn.label().unwrap_or_default().as_str() != "⏹ Cancel Scan" {
-                                        btn.set_sensitive(true);
+                                cb.set_sensitive(false);
+                                let mut child = sbb.first_child();
+                                while let Some(c) = child {
+                                    if let Some(btn) = c.downcast_ref::<Button>() {
+                                        if btn.label().unwrap_or_default().as_str() != "⏹ Cancel Scan" {
+                                            btn.set_sensitive(true);
+                                        }
                                     }
+                                    child = c.next_sibling();
                                 }
-                                child = c.next_sibling();
+                                return;
                             }
-                            return;
                         }
-                        Ok(ScanMessage::Cancelled) => {
-                            pb.set_text(Some("Scan cancelled"));
-                            sl.set_label("Scan was cancelled.");
+                    }
 
-                            cb.set_sensitive(false);
-                            let mut child = sbb.first_child();
-                            while let Some(c) = child {
-                                if let Some(btn) = c.downcast_ref::<Button>() {
-                                    if btn.label().unwrap_or_default().as_str() != "⏹ Cancel Scan" {
-                                        btn.set_sensitive(true);
-                                    }
-                                }
-                                child = c.next_sibling();
-                            }
-                            return;
-                        }
-                        Err(crossbeam_channel::TryRecvError::Empty) => {
-                            // Pulse periodically so the bar shows activity
-                            // while counting or when clamscan output is sparse
-                            if total_files == 0 {
-                                pb.pulse();
-                            }
-                        }
-                        Err(crossbeam_channel::TryRecvError::Disconnected) => {
-                            // Channel closed
-                            return;
-                        }
+                    // Keep the bar visibly moving when nothing has happened for
+                    // a while: while files are being counted, signatures are
+                    // downloaded, or a single large file takes a long time.
+                    if total_files == 0
+                        || last_progress.elapsed() > std::time::Duration::from_millis(1000)
+                    {
+                        pb.pulse();
                     }
                 }
             });
