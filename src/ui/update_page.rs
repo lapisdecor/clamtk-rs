@@ -2,7 +2,8 @@ use gtk4::prelude::*;
 use gtk4::{
     Box, Button, Label, Orientation, ProgressBar, Align,
 };
-use std::process::Command;
+use std::io::{BufReader, Read};
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 enum UpdateMessage {
@@ -12,6 +13,27 @@ enum UpdateMessage {
 
 pub struct UpdatePage {
     container: Box,
+    current_version: Label,
+    signature_count: Label,
+    freshclam_status: Label,
+}
+
+/// Re-detect ClamAV's signature information and show it in the given labels.
+fn apply_clamav_info(current_version: &Label, signature_count: &Label, freshclam_status: &Label) {
+    let info = crate::clamav::refresh_info();
+    current_version.set_label(&format!("Current signature date: {}", info.signature_version));
+    signature_count.set_label(&format!("Known signatures: {}", info.signature_count));
+    set_freshclam_status(freshclam_status, info.is_freshclam_available);
+}
+
+fn set_freshclam_status(label: &Label, available: bool) {
+    if available {
+        label.set_label("Freshclam: ● Available");
+        label.set_css_classes(&["status-good"]);
+    } else {
+        label.set_label("Freshclam: ● Not Found");
+        label.set_css_classes(&["status-bad"]);
+    }
 }
 
 impl UpdatePage {
@@ -70,19 +92,8 @@ impl UpdatePage {
             .halign(Align::Start)
             .build();
 
-        let freshclam_status = if info.is_freshclam_available {
-            Label::builder()
-                .label("Freshclam: ● Available")
-                .css_classes(["status-good"])
-                .halign(Align::Start)
-                .build()
-        } else {
-            Label::builder()
-                .label("Freshclam: ● Not Found")
-                .css_classes(["status-bad"])
-                .halign(Align::Start)
-                .build()
-        };
+        let freshclam_status = Label::builder().halign(Align::Start).build();
+        set_freshclam_status(&freshclam_status, info.is_freshclam_available);
 
         info_box.append(&current_version);
         info_box.append(&signature_count);
@@ -160,12 +171,16 @@ impl UpdatePage {
         let progress_bar_clone = progress_bar.clone();
         let status_label_clone = status_label.clone();
         let output_label_clone = output_label.clone();
+        let current_version_clone = current_version.clone();
+        let signature_count_clone = signature_count.clone();
+        let freshclam_status_clone = freshclam_status.clone();
 
         update_btn.connect_clicked(move |_| {
             update_btn_clone.set_sensitive(false);
             progress_bar_clone.set_fraction(0.0);
             progress_bar_clone.set_text(Some("Updating..."));
             status_label_clone.set_label("Starting signature update...");
+            status_label_clone.set_css_classes(&[]);
             output_label_clone.set_label("");
 
             let (tx, rx) = mpsc::channel();
@@ -182,50 +197,88 @@ impl UpdatePage {
             let sl = status_label_clone.clone();
             let ol = output_label_clone.clone();
             let btn = update_btn_clone.clone();
+            let cv = current_version_clone.clone();
+            let sc = signature_count_clone.clone();
+            let fs = freshclam_status_clone.clone();
 
             glib::spawn_future_local(async move {
                 loop {
                     let _ = glib::timeout_future(std::time::Duration::from_millis(100)).await;
-                    match rx.try_recv() {
-                        Ok(UpdateMessage::Status(status)) => {
-                            sl.set_label(&status);
-                        }
-                        Ok(UpdateMessage::Done(Ok(output))) => {
-                            pb.set_fraction(1.0);
-                            pb.set_text(Some("Update complete"));
 
-                            if output.contains("Database updated") || output.contains("main.cvd") {
-                                sl.set_label("✅ Signatures updated successfully!");
-                                sl.add_css_class("status-good");
-                            } else if output.contains("already up-to-date") {
-                                sl.set_label("ℹ️ Signatures are already up to date.");
-                                sl.add_css_class("status-good");
-                            } else {
-                                sl.set_label("⚠️ Update completed. Check output for details.");
-                                sl.add_css_class("status-warn");
+                    // Drain everything queued this tick: freshclam emits many
+                    // progress lines, and Done must not sit behind them.
+                    let mut finished = false;
+                    loop {
+                        match rx.try_recv() {
+                            Ok(UpdateMessage::Status(status)) => {
+                                sl.set_label(&status);
                             }
+                            Ok(UpdateMessage::Done(Ok(output))) => {
+                                pb.set_fraction(1.0);
+                                pb.set_text(Some("Update complete"));
 
-                            ol.set_label(&output);
-                            btn.set_sensitive(true);
-                            return;
+                                // The database changed, so re-read the signature
+                                // date/count instead of showing the stale values
+                                // captured when this page was built.
+                                apply_clamav_info(&cv, &sc, &fs);
+
+                                let lower = output.to_lowercase();
+                                if lower.contains("up to date") || lower.contains("up-to-date") {
+                                    sl.set_label("ℹ️ Signatures are already up to date.");
+                                    sl.set_css_classes(&["status-good"]);
+                                } else if lower.contains("updated") {
+                                    sl.set_label("✅ Signatures updated successfully!");
+                                    sl.set_css_classes(&["status-good"]);
+                                } else {
+                                    sl.set_label("⚠️ Update completed. Check output for details.");
+                                    sl.set_css_classes(&["status-warn"]);
+                                }
+
+                                ol.set_label(&output);
+                                btn.set_sensitive(true);
+                                finished = true;
+                            }
+                            Ok(UpdateMessage::Done(Err(e))) => {
+                                pb.set_fraction(0.0);
+                                pb.set_text(Some("Update failed"));
+                                sl.set_label(&format!("❌ Update failed: {}", e));
+                                sl.set_css_classes(&["status-bad"]);
+                                ol.set_label(&format!("Error: {}", e));
+                                btn.set_sensitive(true);
+                                finished = true;
+                            }
+                            Err(mpsc::TryRecvError::Empty) => break,
+                            Err(mpsc::TryRecvError::Disconnected) => {
+                                finished = true;
+                                break;
+                            }
                         }
-                        Ok(UpdateMessage::Done(Err(e))) => {
-                            pb.set_fraction(0.0);
-                            pb.set_text(Some("Update failed"));
-                            sl.set_label(&format!("❌ Update failed: {}", e));
-                            sl.add_css_class("status-bad");
-                            ol.set_label(&format!("Error: {}", e));
-                            btn.set_sensitive(true);
-                            return;
-                        }
-                        Err(mpsc::TryRecvError::Empty) => {}
-                        Err(mpsc::TryRecvError::Disconnected) => return,
+                    }
+
+                    if finished {
+                        return;
                     }
                 }
             });
         });
 
-        UpdatePage { container }
+        UpdatePage {
+            container,
+            current_version,
+            signature_count,
+            freshclam_status,
+        }
+    }
+
+    /// Re-detect ClamAV's signature information and update the labels. Called
+    /// whenever the page becomes visible, so it reflects signatures downloaded
+    /// by a scan or by another update.
+    pub fn refresh(&self) {
+        apply_clamav_info(
+            &self.current_version,
+            &self.signature_count,
+            &self.freshclam_status,
+        );
     }
 
     pub fn container(&self) -> &Box {
@@ -282,20 +335,73 @@ fn run_freshclam_in_snap<F: FnMut(&str)>(on_status: &mut F) -> anyhow::Result<St
 
     on_status("Updating virus signatures...");
     // Note: --datadir is intentionally NOT passed; see clamav::ensure_database.
-    let output = Command::new("freshclam")
+    let mut child = Command::new("freshclam")
         .arg("--config-file")
         .arg(&config_path)
-        .output()
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| anyhow::anyhow!("Failed to launch freshclam: {}", e))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    // Drain stderr on a separate thread so a chatty error cannot fill the
+    // pipe and block freshclam while we are reading stdout.
+    let stderr_reader = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let mut reader = BufReader::new(stderr);
+            let _ = reader.read_to_end(&mut buf);
+            buf
+        })
+    });
 
-    if !output.status.success() {
-        anyhow::bail!("{}", stderr.trim());
+    let mut stdout = String::new();
+    if let Some(stdout_pipe) = child.stdout.take() {
+        let mut reader = BufReader::new(stdout_pipe);
+        let mut pending = String::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let read = reader.read(&mut buf)?;
+            if read == 0 {
+                break;
+            }
+            pending.push_str(&String::from_utf8_lossy(&buf[..read]));
+
+            // freshclam terminates lines with either '\n' or '\r' (progress
+            // updates reuse the same line with a carriage return).
+            while let Some(pos) = pending.find(|c| c == '\n' || c == '\r') {
+                let line: String = pending.drain(..=pos).collect();
+                report_progress_line(line.trim(), &mut stdout, on_status);
+            }
+        }
+        report_progress_line(pending.trim(), &mut stdout, on_status);
+    }
+
+    let status = child.wait()?;
+    let stderr = stderr_reader
+        .and_then(|handle| handle.join().ok())
+        .map(|bytes| String::from_utf8_lossy(&bytes).to_string())
+        .unwrap_or_default();
+
+    if !status.success() {
+        let detail = stderr
+            .trim()
+            .lines()
+            .last()
+            .unwrap_or("freshclam failed");
+        anyhow::bail!("{}", detail);
     }
 
     Ok(format!("{}\n{}", stdout, stderr).trim().to_string())
+}
+
+/// Record one freshclam progress line and surface it as a status update.
+fn report_progress_line<F: FnMut(&str)>(line: &str, output: &mut String, on_status: &mut F) {
+    if line.is_empty() {
+        return;
+    }
+    output.push_str(line);
+    output.push('\n');
+    on_status(line);
 }
 
 fn run_privileged(script: &str) -> anyhow::Result<String> {

@@ -105,7 +105,7 @@ impl MainWindow {
             })),
         ));
 
-        let update_page = UpdatePage::new();
+        let update_page = Rc::new(UpdatePage::new());
         let quarantine_page = QuarantinePage::new(&window);
         let history_page = HistoryPage::new(&window);
         let settings_page = SettingsPage::new(&window);
@@ -162,6 +162,15 @@ impl MainWindow {
         stack.connect_visible_child_name_notify(move |stack| {
             if stack.visible_child_name().as_deref() == Some("dashboard") {
                 dashboard_refresh.refresh();
+            }
+        });
+
+        // Refresh the Update page's signature info whenever it is shown, so it
+        // reflects a database downloaded by a scan or a previous update.
+        let update_refresh = update_page.clone();
+        stack.connect_visible_child_name_notify(move |stack| {
+            if stack.visible_child_name().as_deref() == Some("update") {
+                update_refresh.refresh();
             }
         });
 

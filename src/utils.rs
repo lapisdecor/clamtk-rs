@@ -88,11 +88,21 @@ pub fn format_duration(seconds: f64) -> String {
 /// Truncate a path for display
 pub fn truncate_path(path: &str, max_len: usize) -> String {
     if path.len() <= max_len {
-        path.to_string()
-    } else {
-        let start = path.len() - max_len + 3;
-        format!("...{}", &path[start..])
+        return path.to_string();
     }
+    if max_len <= 3 {
+        return ".".repeat(max_len);
+    }
+
+    // Slice by bytes to respect the caller's budget, but never split a UTF-8
+    // character: a path like ".../Música" has a multibyte 'ú' that can land
+    // exactly on the computed start index.
+    let mut start = path.len() - max_len + 3;
+    while start < path.len() && !path.is_char_boundary(start) {
+        start += 1;
+    }
+
+    format!("...{}", &path[start..])
 }
 
 /// Get the display name for a scan type
@@ -513,6 +523,30 @@ mod tests {
         }
 
         testutil::cleanup(&root);
+    }
+
+    #[test]
+    fn truncate_path_does_not_split_utf8() {
+        // Regression: truncating ".../Música/..." used to slice inside the
+        // two-byte 'ú' and panic with "start byte index ... is not a char
+        // boundary".
+        let path = "/home/luis/Música/alguna_cancion_muy_larga.mp3";
+        for max_len in 1..=path.len() + 5 {
+            let truncated = truncate_path(path, max_len);
+            assert!(
+                truncated.len() <= max_len,
+                "max_len={} produced {} bytes",
+                max_len,
+                truncated.len()
+            );
+            assert!(truncated.is_char_boundary(truncated.len()));
+            if max_len > 3 {
+                assert!(path.ends_with(truncated.trim_start_matches("...")));
+            }
+        }
+
+        assert_eq!(truncate_path("short", 80), "short");
+        assert_eq!(truncate_path("Música", 3), "...");
     }
 
     #[test]
