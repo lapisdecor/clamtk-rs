@@ -6,7 +6,7 @@ pub fn show_about_dialog(parent: &Window) {
         .transient_for(parent)
         .modal(true)
         .program_name("ClamTK Rust")
-        .version("1.0.0")
+        .version(env!("CARGO_PKG_VERSION"))
         .comments("A GTK4 graphical frontend for ClamAV — Rust port of ClamTK")
         .copyright("© 2026 ClamTK Rust Contributors")
         .license_type(License::Gpl30)
