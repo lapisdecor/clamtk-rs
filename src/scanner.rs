@@ -126,18 +126,19 @@ impl Scanner {
 
             // Inside a snap the bundled freshclam writes the signature database
             // to the snap's writable data directory, so clamscan must be told
-            // where to find it. Download it first if it is not there yet.
+            // where to find it. Make sure it is present and intact first:
+            // a database left behind by an interrupted download makes clamscan
+            // abort with "Can't verify database integrity" before scanning.
             if crate::utils::is_running_in_snap() {
-                let needs_download = !crate::clamav::snap_database_available();
-                if needs_download {
+                let prepared = crate::clamav::prepare_snap_database(|status| {
                     let _ = tx.send(ScanMessage::Progress {
-                        current_file: "Downloading virus definitions (first run)...".into(),
+                        current_file: status.into(),
                         files_scanned: 0,
                         known_threats: 0,
                         total_files,
                     });
-                }
-                if let Err(e) = crate::clamav::ensure_database() {
+                });
+                if let Err(e) = prepared {
                     let _ = tx.send(ScanMessage::Error(format!(
                         "Could not prepare the virus database: {}",
                         e
@@ -358,14 +359,13 @@ impl Scanner {
                         if files_scanned == 0 && results.is_empty() {
                             // Nothing was scanned at all: a real failure
                             // (e.g. unreadable database or target).
-                            let reason = stderr_output
-                                .lines()
-                                .rev()
-                                .find(|l| !l.trim().is_empty())
-                                .unwrap_or("unknown error");
+                            log::error!(
+                                "clamscan failed (exit code 2) before scanning any file: {}",
+                                stderr_output.trim()
+                            );
                             let _ = tx.send(ScanMessage::Error(format!(
                                 "clamscan failed (exit code 2): {}",
-                                reason
+                                describe_scan_failure(&stderr_output)
                             )));
                             return;
                         }
@@ -445,6 +445,54 @@ fn count_files(path: &std::path::Path) -> u64 {
         .count() as u64
 }
 
+/// Turn clamscan's stderr into a message that tells the user what to do.
+///
+/// ClamAV hides the useful diagnostic (`... certificate is not yet valid`,
+/// `MD5 hash does not match`, ...) above a generic final line, so pick the
+/// informative line and add an action instead of showing only
+/// "Can't verify database integrity".
+fn describe_scan_failure(stderr: &str) -> String {
+    let lower = stderr.to_lowercase();
+    let detail = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .find(|line| {
+            let line = line.to_lowercase();
+            line.contains("not yet valid")
+                || line.contains("has expired")
+                || line.contains("md5")
+                || line.contains("signature")
+                || line.contains("can't open")
+        })
+        .or_else(|| {
+            stderr
+                .lines()
+                .rev()
+                .find(|line| !line.trim().is_empty())
+                .map(str::trim)
+        })
+        .unwrap_or("unknown error");
+
+    if lower.contains("not yet valid") || lower.contains("has expired") {
+        return format!(
+            "the virus database certificate is not valid at the current system time ({}). Check that the date and time are correct and try again",
+            detail
+        );
+    }
+
+    if lower.contains("can't verify database integrity")
+        || lower.contains("cannot verify database integrity")
+    {
+        return format!(
+            "the virus database is damaged or could not be verified ({}). Update the virus definitions and try again",
+            detail
+        );
+    }
+
+    detail.to_string()
+}
+
 impl Default for Scanner {
     fn default() -> Self {
         Self::new()
@@ -454,6 +502,23 @@ impl Default for Scanner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn database_failures_get_an_actionable_message() {
+        let clock = describe_scan_failure(
+            "LibClamAV Error: cli_cvdload: Can't verify CVD file main.cvd: \
+             Error verifying signature: certificate is not yet valid\n\
+             ERROR: Can't verify database integrity",
+        );
+        assert!(clock.contains("date and time"), "{}", clock);
+
+        let corrupt = describe_scan_failure(
+            "LibClamAV Error: cli_cvdload: Can't verify CVD file main.cvd: \
+             MD5 hash does not match\n\
+             ERROR: Can't verify database integrity",
+        );
+        assert!(corrupt.contains("damaged"), "{}", corrupt);
+    }
 
     #[test]
     fn full_scan_reaches_completed() {

@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
 
@@ -49,6 +50,10 @@ fn detect_clamav() -> Result<ClamAvInfo> {
     if let Some(db_dir) = crate::utils::snap_database_dir() {
         version_args.push("--database".into());
         version_args.push(db_dir.to_string_lossy().to_string());
+    }
+    if let Some(certs_dir) = crate::utils::snap_cvdcerts_dir() {
+        version_args.push("--cvdcertsdir".into());
+        version_args.push(certs_dir.to_string_lossy().to_string());
     }
 
     let clamscan_version = get_command_output(
@@ -169,24 +174,361 @@ pub fn write_snap_freshclam_config() -> Result<std::path::PathBuf> {
     Ok(config_path)
 }
 
-/// Whether the snap's signature database already contains a usable database
-/// file (`.cvd`/`.cld`). Used to decide whether a download is needed.
-pub fn snap_database_available() -> bool {
-    let db_dir = match crate::utils::snap_database_dir() {
-        Some(d) => d,
-        None => return false,
-    };
+/// The database file for `stem` ("main" or "daily"), preferring `.cvd` over
+/// `.cld`, but only if it actually contains data. A zero-length file left by an
+/// interrupted download is not usable.
+fn database_file(db_dir: &Path, stem: &str) -> Option<PathBuf> {
+    ["cvd", "cld"].iter().find_map(|ext| {
+        let path = db_dir.join(format!("{}.{}", stem, ext));
+        let usable = std::fs::metadata(&path)
+            .map(|meta| meta.is_file() && meta.len() > 0)
+            .unwrap_or(false);
+        usable.then_some(path)
+    })
+}
 
-    std::fs::read_dir(&db_dir)
+/// Whether `db` has the detached `<name>-<version>.<ext>.sign` file next to it.
+///
+/// Without one ClamAV falls back to the legacy MD5/RSA signature embedded in
+/// the CVD header, which still works, so there is nothing for us to verify.
+fn has_sign_file(db_dir: &Path, db: &Path) -> bool {
+    let (Some(stem), Some(ext)) = (
+        db.file_stem().and_then(|s| s.to_str()),
+        db.extension().and_then(|e| e.to_str()),
+    ) else {
+        return false;
+    };
+    let prefix = format!("{}-", stem);
+    let suffix = format!(".{}.sign", ext);
+
+    std::fs::read_dir(db_dir)
         .map(|entries| {
-            entries.filter_map(|e| e.ok()).any(|e| {
-                e.path()
-                    .extension()
-                    .map(|ext| ext == "cvd" || ext == "cld")
-                    .unwrap_or(false)
+            entries.filter_map(|e| e.ok()).any(|entry| {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                name.starts_with(&prefix) && name.ends_with(&suffix)
             })
         })
         .unwrap_or(false)
+}
+
+/// Whether the snap's signature database already contains usable `main` and
+/// `daily` files (`.cvd`/`.cld`). Used to decide whether a download is needed.
+pub fn snap_database_available() -> bool {
+    let Some(db_dir) = crate::utils::snap_database_dir() else {
+        return false;
+    };
+
+    database_file(&db_dir, "main").is_some() && database_file(&db_dir, "daily").is_some()
+}
+
+/// Identifies the current database files by name, size and modification time,
+/// so a successful verification is not repeated until the database changes.
+/// The detached signatures are included too: a stale `.sign` next to an
+/// otherwise unchanged CVD is what makes clamscan reject the database.
+fn database_fingerprint(db_dir: &Path) -> Option<String> {
+    let mut parts = Vec::new();
+    for entry in std::fs::read_dir(db_dir).ok()?.filter_map(|e| e.ok()) {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let relevant = name.ends_with(".cvd")
+            || name.ends_with(".cld")
+            || name.ends_with(".cud")
+            || name.ends_with(".sign");
+        if !relevant {
+            continue;
+        }
+
+        let meta = entry.metadata().ok()?;
+        let nanos = meta
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        parts.push(format!("{}:{}:{}", name, meta.len(), nanos));
+    }
+
+    parts.sort();
+    (!parts.is_empty()).then(|| parts.join("\n"))
+}
+
+/// Stamp recording which database the last successful verification covered.
+/// It lives outside the database directory so freshclam never mistakes it for
+/// a signature file.
+fn verification_stamp_path(db_dir: &Path) -> Option<PathBuf> {
+    db_dir.parent().map(|p| p.join(".clamtk-db-verified"))
+}
+
+fn database_verification_cached(db_dir: &Path, fingerprint: &str) -> bool {
+    verification_stamp_path(db_dir)
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|stamp| stamp.trim() == fingerprint)
+}
+
+fn mark_database_verified(db_dir: &Path, fingerprint: &str) {
+    if let Some(stamp) = verification_stamp_path(db_dir) {
+        if let Err(e) = std::fs::write(&stamp, fingerprint) {
+            log::warn!("could not write {}: {}", stamp.display(), e);
+        }
+    }
+}
+
+/// Outcome of checking a database's digital signature.
+#[derive(Debug, PartialEq, Eq)]
+enum DatabaseVerdict {
+    /// The signed files verified, or there was nothing to verify.
+    Ok,
+    /// No usable verifier is available here (missing sigtool/certs).
+    CannotVerify(String),
+    /// The certificate is outside its validity window: the clock is wrong.
+    Clock(String),
+    /// The files or their signatures are damaged.
+    Invalid(String),
+}
+
+/// Pick the most useful line out of sigtool's output.
+fn verification_detail(output: &str) -> String {
+    let mut first = "";
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        if first.is_empty() {
+            first = line;
+        }
+        let lower = line.to_lowercase();
+        if lower.contains("not yet valid")
+            || lower.contains("has expired")
+            || lower.contains("failed to verify")
+            || lower.contains("signature")
+            || lower.contains("error:")
+        {
+            return line.to_string();
+        }
+    }
+    first.to_string()
+}
+
+fn classify_verification_failure(output: &str) -> DatabaseVerdict {
+    let lower = output.to_lowercase();
+    let detail = verification_detail(output);
+
+    if lower.contains("not yet valid")
+        || lower.contains("has expired")
+        || lower.contains("certificate expired")
+    {
+        // Re-downloading cannot help: the signing certificate is valid, the
+        // device clock is not.
+        DatabaseVerdict::Clock(detail)
+    } else if lower.contains("no such file")
+        || lower.contains("cannot open shared object")
+        || lower.contains("command not found")
+    {
+        DatabaseVerdict::CannotVerify(detail)
+    } else {
+        DatabaseVerdict::Invalid(detail)
+    }
+}
+
+/// Verify one database file with the bundled `sigtool`, which reports the real
+/// reason instead of clamscan's generic "Can't verify database integrity".
+fn verify_database_file(db: &Path) -> DatabaseVerdict {
+    let Some(certs) = crate::utils::snap_cvdcerts_dir() else {
+        return DatabaseVerdict::CannotVerify(
+            "the snap certificate directory is unavailable".into(),
+        );
+    };
+
+    let output = match Command::new("sigtool")
+        .arg("--verify")
+        .arg(db)
+        .arg("--cvdcertsdir")
+        .arg(&certs)
+        .output()
+    {
+        Ok(output) => output,
+        Err(e) => {
+            return DatabaseVerdict::CannotVerify(format!("could not run sigtool: {}", e));
+        }
+    };
+
+    if output.status.success() {
+        return DatabaseVerdict::Ok;
+    }
+
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    classify_verification_failure(&text)
+}
+
+/// Verify every `.cvd`/`.cld`/`.cud` file that has a detached signature.
+/// ClamAV loads all of them from the database directory, so a damaged extra
+/// file breaks the scan just as surely as a damaged `main.cvd`.
+fn verify_database(db_dir: &Path) -> DatabaseVerdict {
+    let Ok(entries) = std::fs::read_dir(db_dir) else {
+        return DatabaseVerdict::Ok;
+    };
+
+    let mut files: Vec<PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext == "cvd" || ext == "cld" || ext == "cud")
+        })
+        .collect();
+    files.sort();
+
+    let mut verdict = DatabaseVerdict::Ok;
+
+    for db in files {
+        if !has_sign_file(db_dir, &db) {
+            continue;
+        }
+
+        match verify_database_file(&db) {
+            DatabaseVerdict::Ok => {}
+            DatabaseVerdict::Clock(detail) => return DatabaseVerdict::Clock(detail),
+            DatabaseVerdict::Invalid(detail) => verdict = DatabaseVerdict::Invalid(detail),
+            DatabaseVerdict::CannotVerify(detail) => {
+                if verdict == DatabaseVerdict::Ok {
+                    verdict = DatabaseVerdict::CannotVerify(detail);
+                }
+            }
+        }
+    }
+
+    verdict
+}
+
+/// Remove the downloaded database files and the verification stamp so
+/// `ensure_database()` fetches a clean copy. Only files this app owns are
+/// touched.
+fn reset_snap_database() -> Result<()> {
+    let db_dir = crate::utils::snap_database_dir()
+        .context("SNAP_USER_COMMON is not set; not running inside a snap")?;
+
+    if let Ok(entries) = std::fs::read_dir(&db_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            let is_database = name.ends_with(".cvd")
+                || name.ends_with(".cld")
+                || name.ends_with(".cud")
+                || name.ends_with(".sign")
+                || name == "freshclam.dat";
+            if !is_database || !entry.file_type().is_ok_and(|t| t.is_file()) {
+                continue;
+            }
+
+            let path = entry.path();
+            std::fs::remove_file(&path)
+                .with_context(|| format!("Failed to remove {}", path.display()))?;
+        }
+    }
+
+    if let Some(stamp) = verification_stamp_path(&db_dir) {
+        let _ = std::fs::remove_file(stamp);
+    }
+
+    Ok(())
+}
+
+/// Make sure the snap's database is present and passes ClamAV's signature
+/// check before a scan starts.
+///
+/// A database left behind by a killed download (or a stale detached signature)
+/// makes clamscan abort with "Can't verify database integrity" before it scans
+/// a single file. Rather than surfacing that, verify the database with the
+/// bundled `sigtool` and re-download it when it is damaged. The check runs only
+/// when the database files change; the result is cached in a stamp file.
+pub fn prepare_snap_database<F: FnMut(&str)>(mut on_status: F) -> Result<()> {
+    if !crate::utils::is_running_in_snap() {
+        return Ok(());
+    }
+
+    let db_dir = crate::utils::snap_database_dir()
+        .context("SNAP_USER_COMMON is not set; not running inside a snap")?;
+
+    if !snap_database_available() {
+        on_status("Downloading virus definitions...");
+        ensure_database()?;
+    }
+
+    if !snap_database_available() {
+        anyhow::bail!(
+            "the virus database is still missing or incomplete. Check your network connection and try again"
+        );
+    }
+
+    let fingerprint =
+        database_fingerprint(&db_dir).context("could not read the downloaded virus database")?;
+    if database_verification_cached(&db_dir, &fingerprint) {
+        return Ok(());
+    }
+
+    on_status("Verifying virus database...");
+    match verify_database(&db_dir) {
+        DatabaseVerdict::Ok => {
+            mark_database_verified(&db_dir, &fingerprint);
+            Ok(())
+        }
+        DatabaseVerdict::CannotVerify(detail) => {
+            // Let clamscan decide: it may still load the database through the
+            // legacy signature embedded in the file.
+            log::warn!("could not verify the virus database: {}", detail);
+            Ok(())
+        }
+        DatabaseVerdict::Clock(detail) => anyhow::bail!(
+            "the virus database certificate is not valid at the current system time ({}). Check that the date and time are correct and try again",
+            detail
+        ),
+        DatabaseVerdict::Invalid(detail) => {
+            log::warn!(
+                "virus database failed verification ({}); downloading a clean copy",
+                detail
+            );
+
+            on_status("Repairing virus database...");
+            reset_snap_database()?;
+            on_status("Downloading virus definitions...");
+            ensure_database()?;
+
+            if !snap_database_available() {
+                anyhow::bail!(
+                    "the virus database could not be repaired automatically ({}). Check your network connection and try again",
+                    detail
+                );
+            }
+
+            let fingerprint = database_fingerprint(&db_dir)
+                .context("could not read the downloaded virus database")?;
+            match verify_database(&db_dir) {
+                DatabaseVerdict::Ok => {
+                    mark_database_verified(&db_dir, &fingerprint);
+                    Ok(())
+                }
+                DatabaseVerdict::CannotVerify(detail) => {
+                    log::warn!("could not verify the repaired virus database: {}", detail);
+                    Ok(())
+                }
+                DatabaseVerdict::Clock(detail) => anyhow::bail!(
+                    "the virus database certificate is not valid at the current system time ({}). Check that the date and time are correct and try again",
+                    detail
+                ),
+                DatabaseVerdict::Invalid(detail) => anyhow::bail!(
+                    "the virus database is damaged and could not be repaired automatically ({}). Try again later",
+                    detail
+                ),
+            }
+        }
+    }
 }
 
 /// Make sure the virus database is available before scanning. Inside a snap
@@ -236,4 +578,76 @@ pub fn is_clamd_running() -> bool {
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::testutil;
+
+    #[test]
+    fn database_requires_non_empty_main_and_daily() {
+        let _guard = testutil::env_lock();
+        let common = testutil::temp_dir("clamav_database_available");
+        testutil::set_snap_env(&common);
+        let db_dir = common.join("clamav");
+        std::fs::create_dir_all(&db_dir).unwrap();
+
+        // Only bytecode: not enough to scan.
+        std::fs::write(db_dir.join("bytecode.cvd"), b"x").unwrap();
+        assert!(!snap_database_available());
+
+        // main alone is still not enough.
+        std::fs::write(db_dir.join("main.cvd"), b"x").unwrap();
+        assert!(!snap_database_available());
+
+        // A zero-length file is what an interrupted download leaves behind.
+        std::fs::write(db_dir.join("daily.cvd"), b"").unwrap();
+        assert!(!snap_database_available());
+
+        std::fs::write(db_dir.join("daily.cvd"), b"x").unwrap();
+        assert!(snap_database_available());
+
+        testutil::cleanup(&common);
+        // Do not leave the fake snap environment behind for later tests.
+        std::env::remove_var("SNAP");
+        std::env::remove_var("SNAP_NAME");
+        std::env::remove_var("SNAP_USER_COMMON");
+    }
+
+    #[test]
+    fn clock_and_corruption_failures_are_distinguished() {
+        assert!(matches!(
+            classify_verification_failure(
+                "Error verifying signature: ... certificate is not yet valid\n\
+                 ERROR: verify: Failed to verify file"
+            ),
+            DatabaseVerdict::Clock(_)
+        ));
+        assert!(matches!(
+            classify_verification_failure(
+                "LibClamAV Error: cli_cvdload: Can't verify CVD file main.cvd: MD5 hash does not match"
+            ),
+            DatabaseVerdict::Invalid(_)
+        ));
+        assert!(matches!(
+            classify_verification_failure(
+                "verify: Failed to create verifier: ... no such file or directory"
+            ),
+            DatabaseVerdict::CannotVerify(_)
+        ));
+    }
+
+    #[test]
+    fn detached_signature_is_recognised() {
+        let db_dir = testutil::temp_dir("clamav_sign_file");
+        let cvd = db_dir.join("main.cvd");
+        std::fs::write(&cvd, b"x").unwrap();
+        assert!(!has_sign_file(&db_dir, &cvd));
+
+        std::fs::write(db_dir.join("main-63.cvd.sign"), b"x").unwrap();
+        assert!(has_sign_file(&db_dir, &cvd));
+
+        testutil::cleanup(&db_dir);
+    }
 }
